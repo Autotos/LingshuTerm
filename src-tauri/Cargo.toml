@@ -29,3 +29,6 @@ russh = { version = "0.60", default-features = false, features = ["ring", "flate
 async-trait = "0.1"
 serialport = "4.3"
 regex = "1"
+# AES-GCM encryption for connection password storage
+ring = "0.17"
+base64 = "0.22"

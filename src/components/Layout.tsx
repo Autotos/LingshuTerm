@@ -8,9 +8,11 @@ import { BlocksPanel } from './BlocksPanel';
 import { BottomInputArea } from './BottomInputArea';
 import { SettingsModal } from './SettingsModal';
 import { SessionTypeModal } from './SessionTypeModal';
+import { SessionManager } from './SessionManager';
 import { StatusBar } from './StatusBar';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
+import { useConnectionStore } from '@/stores/connectionStore';
 import { useBlockSession } from '@/hooks/useBlockSession';
 import { useAiSubmit } from '@/hooks/useAiSubmit';
 import { useTaskQueue } from '@/hooks/useTaskQueue';
@@ -28,6 +30,12 @@ export function Layout() {
 
   // 启动持久化：restore -> subscribe（只在顶层组件挂载一次）
   const persistence = usePersistenceBootstrap();
+
+  // 启动时从磁盘加载已保存连接（加密存储）
+  const loadConnections = useConnectionStore((s) => s.loadFromDisk);
+  useEffect(() => {
+    loadConnections();
+  }, [loadConnections]);
 
   // 避免 StrictMode 双挂载时重复 create_session
   const bootstrappedRef = useRef(false);
@@ -134,11 +142,27 @@ export function Layout() {
             <span className="text-[11px] text-[var(--text-3)] ml-2">{shortSessionId}</span>
           </div>
 
-          {/* Content area — 始终挂载三个面板，用 CSS 隐藏非活跃视图，保留 xterm.js 实例和 scrollback buffer */}
+          {/* Content area — 每个会话的 Terminal 始终挂载（CSS 隐藏非活跃），
+              保留 xterm.js 实例和 scrollback buffer。Blocks/Editor 仅渲染当前会话 */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-            <div className={activeView === 'terminal' ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}>
-              <TerminalPanel sessionId={activeSessionId} isVisible={activeView === 'terminal'} />
-            </div>
+            {/* Terminal：每个已打开会话保留一个 TerminalPanel 实例 */}
+            {Array.from(sessions.values()).map((s) => (
+              <div
+                key={`term-${s.id}`}
+                className={
+                  s.id === activeSessionId && activeView === 'terminal'
+                    ? 'flex-1 min-h-0 flex flex-col'
+                    : 'hidden'
+                }
+              >
+                <TerminalPanel
+                  sessionId={s.id}
+                  isVisible={s.id === activeSessionId && activeView === 'terminal'}
+                />
+              </div>
+            ))}
+
+            {/* Blocks / Editor：仅当前活跃会话 */}
             <div className={activeView === 'blocks' ? 'flex-1 min-h-0 flex flex-col' : 'hidden'}>
               <BlocksPanel sessionId={activeSessionId} />
             </div>
@@ -169,6 +193,9 @@ export function Layout() {
 
       {/* Unified New Session Modal (Remote SSH/Telnet/Serial + Local) */}
       <SessionTypeModal />
+
+      {/* Session Manager (tree view, drag & drop groups) */}
+      <SessionManager />
     </div>
   );
 }

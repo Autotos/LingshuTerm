@@ -1,7 +1,7 @@
 //! Session 持久化模块
 //!
 //! 目录布局：
-//!   {appDataDir}/sessions/{session_id}/
+//!   {HOME}/.LingShuTerm/workspace/sessions/{session_id}/
 //!     ├─ meta.json      # Session 元信息（id/name/mode/createdAt/lastAccessed 等）
 //!     ├─ blocks.json    # Blocks 视图数据（tasks/currentFlow）
 //!     ├─ editor.json    # Editor 视图数据（files/openFiles/activeFile/theme）
@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use crate::utils::workspace_dir;
 
 const SESSIONS_DIR: &str = "sessions";
 const META_FILE: &str = "meta.json";
@@ -52,12 +54,8 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn app_sessions_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let base = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("failed to resolve app_data_dir: {}", e))?;
-    Ok(base.join(SESSIONS_DIR))
+fn app_sessions_root(_app: &AppHandle) -> Result<PathBuf, String> {
+    workspace_dir().map(|d| d.join(SESSIONS_DIR))
 }
 
 fn session_dir(app: &AppHandle, session_id: &str) -> Result<PathBuf, String> {

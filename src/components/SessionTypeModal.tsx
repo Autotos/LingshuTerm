@@ -36,7 +36,8 @@ type RemoteProtocol = Extract<Protocol, 'ssh' | 'telnet' | 'serial'>;
 export function SessionTypeModal() {
   const sessionModalOpen = useUiStore((s) => s.sessionModalOpen);
   const closeCreateSessionModal = useUiStore((s) => s.closeCreateSessionModal);
-  const { savedConnections, addConnection, removeConnection } = useConnectionStore();
+  const { savedConnections, addConnection, removeConnection, touchConnection } =
+    useConnectionStore();
   const addSession = useSessionStore((s) => s.addSession);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
 
@@ -46,13 +47,13 @@ export function SessionTypeModal() {
 
   // SSH fields
   const [sshHost, setSshHost] = useState('');
-  const [sshPort, setSshPort] = useState(22);
+  const [sshPort, setSshPort] = useState('22');
   const [sshUser, setSshUser] = useState('root');
   const [sshPass, setSshPass] = useState('');
 
   // Telnet fields
   const [telnetHost, setTelnetHost] = useState('');
-  const [telnetPort, setTelnetPort] = useState(23);
+  const [telnetPort, setTelnetPort] = useState('23');
 
   // Serial fields
   const [serialPort, setSerialPort] = useState('');
@@ -75,8 +76,8 @@ export function SessionTypeModal() {
     setCategory('remote');
     setProtocol('ssh');
     setName('');
-    setSshHost(''); setSshPort(22); setSshUser('root'); setSshPass('');
-    setTelnetHost(''); setTelnetPort(23);
+    setSshHost(''); setSshPort('22'); setSshUser('root'); setSshPass('');
+    setTelnetHost(''); setTelnetPort('23');
     setSerialPort(''); setBaudRate(115200); setDataBits(8); setStopBits(1); setParity('none');
     setLocalCwd('');
     setError('');
@@ -131,9 +132,9 @@ export function SessionTypeModal() {
     }
     switch (protocol) {
       case 'ssh':
-        return { protocol: 'ssh', host: sshHost, port: sshPort, username: sshUser, password: sshPass };
+        return { protocol: 'ssh', host: sshHost, port: parseInt(sshPort, 10) || 22, username: sshUser, password: sshPass };
       case 'telnet':
-        return { protocol: 'telnet', host: telnetHost, port: telnetPort };
+        return { protocol: 'telnet', host: telnetHost, port: parseInt(telnetPort, 10) || 23 };
       case 'serial':
         return { protocol: 'serial', portName: serialPort, baudRate, dataBits, stopBits, parity };
     }
@@ -164,6 +165,22 @@ export function SessionTypeModal() {
     try {
       const config = buildConfig();
       if (!config) throw new Error('Please choose a shell first');
+
+      // 连接时校验端口
+      if (config.protocol === 'ssh' || config.protocol === 'telnet') {
+        const portStr = config.protocol === 'ssh' ? sshPort : telnetPort;
+        if (!portStr.trim()) {
+          throw new Error('Port number is required');
+        }
+        if (!/^\d+$/.test(portStr)) {
+          throw new Error('Port must be a number');
+        }
+        const portNum = parseInt(portStr, 10);
+        if (portNum < 1 || portNum > 65535) {
+          throw new Error('Port must be between 1 and 65535');
+        }
+      }
+
       const displayName = name || connectionLabel(config);
       await launchSession(config, displayName);
       close();
@@ -172,7 +189,7 @@ export function SessionTypeModal() {
     } finally {
       setBusy(false);
     }
-  }, [buildConfig, name, launchSession, close]);
+  }, [buildConfig, name, sshPort, telnetPort, launchSession, close]);
 
   const handleSave = useCallback(() => {
     const config = buildConfig();
@@ -184,6 +201,7 @@ export function SessionTypeModal() {
   const handleQuickConnect = useCallback(async (saved: SavedConnection) => {
     setBusy(true);
     setError('');
+    touchConnection(saved.id);
     try {
       await launchSession(saved.config, saved.name);
       close();
@@ -192,22 +210,23 @@ export function SessionTypeModal() {
     } finally {
       setBusy(false);
     }
-  }, [launchSession, close]);
+  }, [launchSession, close, touchConnection]);
 
   const handleFillFromSaved = useCallback((saved: SavedConnection) => {
     const cfg = saved.config;
+    touchConnection(saved.id);
     setCategory('remote');
     setName(saved.name);
     setError('');
     switch (cfg.protocol) {
       case 'ssh':
         setProtocol('ssh');
-        setSshHost(cfg.host); setSshPort(cfg.port);
+        setSshHost(cfg.host); setSshPort(String(cfg.port));
         setSshUser(cfg.username); setSshPass(cfg.password);
         break;
       case 'telnet':
         setProtocol('telnet');
-        setTelnetHost(cfg.host); setTelnetPort(cfg.port);
+        setTelnetHost(cfg.host); setTelnetPort(String(cfg.port));
         break;
       case 'serial':
         setProtocol('serial');
@@ -225,10 +244,10 @@ export function SessionTypeModal() {
     setError('');
     if (p === 'ssh') {
       const d = defaultSshConfig();
-      setSshHost(d.host); setSshPort(d.port); setSshUser(d.username); setSshPass(d.password);
+      setSshHost(d.host); setSshPort('22'); setSshUser(d.username); setSshPass(d.password);
     } else if (p === 'telnet') {
       const d = defaultTelnetConfig();
-      setTelnetHost(d.host); setTelnetPort(d.port);
+      setTelnetHost(d.host); setTelnetPort('23');
     } else {
       const d = defaultSerialConfig();
       setSerialPort(d.portName); setBaudRate(d.baudRate); setDataBits(d.dataBits);
@@ -236,8 +255,15 @@ export function SessionTypeModal() {
     }
   }, []);
 
+  /** 最近 3 个远程已保存连接（按 lastUsedAt 降序，未使用过的按 createdAt 降序） */
   const remoteSavedList = useMemo(
-    () => savedConnections.filter((c) => c.config.protocol !== 'local'),
+    () =>
+      savedConnections
+        .filter((c) => c.config.protocol !== 'local')
+        .sort((a, b) =>
+          (b.lastUsedAt || b.createdAt).localeCompare(a.lastUsedAt || a.createdAt),
+        )
+        .slice(0, 3),
     [savedConnections],
   );
 
@@ -363,8 +389,8 @@ export function SessionTypeModal() {
                   </Field>
                   <div className="flex gap-3">
                     <Field label="Port" className="w-24">
-                      <input type="number" className="settings-input" value={sshPort}
-                        onChange={(e) => setSshPort(parseInt(e.target.value) || 22)} min={1} max={65535} />
+                      <input type="text" inputMode="numeric" className="settings-input" value={sshPort}
+                        onChange={(e) => setSshPort(e.target.value)} />
                     </Field>
                     <Field label="Username" className="flex-1">
                       <input type="text" className="settings-input" value={sshUser}
@@ -385,8 +411,8 @@ export function SessionTypeModal() {
                       onChange={(e) => setTelnetHost(e.target.value)} placeholder="192.168.1.1 or hostname" />
                   </Field>
                   <Field label="Port">
-                    <input type="number" className="settings-input" value={telnetPort}
-                      onChange={(e) => setTelnetPort(parseInt(e.target.value) || 23)} min={1} max={65535} />
+                    <input type="text" inputMode="numeric" className="settings-input" value={telnetPort}
+                      onChange={(e) => setTelnetPort(e.target.value)} />
                   </Field>
                 </>
               )}

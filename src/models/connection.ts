@@ -54,13 +54,32 @@ export interface LocalShellOption {
   path: string;
 }
 
-// ─── Saved connection entry (persisted in localStorage) ──────────────
+// ─── Saved connection entry (persisted in encrypted storage) ──
 
 export interface SavedConnection {
   id: string;
   name: string;
   config: ConnectionConfig;
   createdAt: string;
+  /** ISO timestamp of last quick-connect or edit, used for recency sort */
+  lastUsedAt?: string;
+  /** Directory group this connection belongs to. undefined = root level */
+  group?: string;
+}
+
+// ─── Session Manager tree types ────────────────────────────────
+
+export interface TreeNode {
+  id: string;
+  label: string;
+  type: 'directory' | 'session';
+  children?: TreeNode[];
+  sessionData?: SavedConnection;
+}
+
+export interface StoragePayload {
+  connections: SavedConnection[];
+  groups: string[];
 }
 
 // ─── Serial port info (from Rust) ────────────────────────────────────

@@ -8,6 +8,8 @@ use lingshu_term2_lib::{
     persistence,
     session_commands,
     shell::PtyManager,
+    storage,
+    utils,
 };
 use tauri::Manager;
 
@@ -49,8 +51,16 @@ fn main() {
             persistence::load_session,
             persistence::list_sessions,
             persistence::clear_session,
+            // Connection storage (encrypted)
+            storage::load_connections,
+            storage::save_connections,
         ])
         .setup(|app| {
+            // 确保工作空间存在
+            if let Err(e) = utils::ensure_workspace() {
+                tracing::error!("failed to ensure workspace: {}", e);
+            }
+
             let pty_manager = app.state::<PtyManager>();
             pty_manager.set_app_handle(app.handle().clone());
 
