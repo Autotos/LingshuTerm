@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tracing::{info, warn};
 
-use crate::block::{self, MarkerScanner, ShellType};
-use crate::output_sanitizer::sanitize_output;
-use crate::stream_cleaner::StreamCleaner;
+use crate::block::{self, ShellType};
+use crate::stream::core::UnifiedStreamCore;
+use crate::stream::event;
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -39,9 +39,6 @@ pub enum ConnectionConfig {
         stop_bits: u8,
         parity: String,
     },
-    /// Local PTY session; handled by `PtyManager`, not `ConnectionManager`.
-    /// Present in this enum so the unified `SessionConfig` frontend type can
-    /// be deserialized in one shot by the dispatcher command.
     #[serde(rename_all = "camelCase")]
     Local {
         shell: String,
@@ -57,8 +54,6 @@ pub struct PortInfo {
 
 // ─── Internal session ────────────────────────────────────────
 
-/// Writer adapter: wraps tokio unbounded sender as std::io::Write.
-/// Used for SSH where the channel lives in an async tokio task.
 struct TokioMpscWriter(tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
 
 impl Write for TokioMpscWriter {
@@ -101,11 +96,8 @@ pub struct ConnectionManager {
     sessions: Arc<RwLock<HashMap<String, ConnectionSession>>>,
     next_ids: Mutex<HashMap<String, AtomicUsize>>,
     app_handle: Arc<RwLock<Option<AppHandle>>>,
-    /// Per-session OSC 7701 marker scanners — enables Blocks mode detection
-    /// on SSH (and future protocol) sessions by scanning inbound bytes.
-    scanners: Arc<std::sync::Mutex<HashMap<String, MarkerScanner>>>,
-    /// Per-session OSC 133 stream cleaners (pure Blocks output extractor).
-    cleaners: Arc<std::sync::Mutex<HashMap<String, StreamCleaner>>>,
+    /// Per-session unified stream cores (3.0: replaces separate MarkerScanner + StreamCleaner maps).
+    stream_cores: Arc<std::sync::Mutex<HashMap<String, UnifiedStreamCore>>>,
 }
 
 impl ConnectionManager {
@@ -118,8 +110,7 @@ impl ConnectionManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             next_ids: Mutex::new(ids),
             app_handle: Arc::new(RwLock::new(None)),
-            scanners: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            cleaners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            stream_cores: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -203,17 +194,11 @@ impl ConnectionManager {
         let flag = shutdown_flag.clone();
         let app = self.get_app_handle();
 
-        // Register a MarkerScanner for this session so Blocks mode can detect
-        // OSC 7701 markers emitted by wrapped remote commands.
-        if let Ok(mut s) = self.scanners.lock() {
-            s.insert(session_id.clone(), MarkerScanner::new());
+        // Register a UnifiedStreamCore for this session.
+        if let Ok(mut cores) = self.stream_cores.lock() {
+            cores.insert(session_id.clone(), UnifiedStreamCore::new());
         }
-        // Register a StreamCleaner for OSC 133 state machine / line filter.
-        if let Ok(mut c) = self.cleaners.lock() {
-            c.insert(session_id.clone(), StreamCleaner::new());
-        }
-        let scanners = Arc::clone(&self.scanners);
-        let cleaners = Arc::clone(&self.cleaners);
+        let stream_cores = Arc::clone(&self.stream_cores);
 
         // Spawn async reader/writer task
         tokio::spawn(async move {
@@ -229,46 +214,17 @@ impl ConnectionManager {
                             Some(russh::ChannelMsg::Data { data }) => {
                                 let bytes: &[u8] = &data;
                                 if let Some(ref app) = app {
-                                    // Scan for OSC 7701 markers on the RAW byte stream first;
-                                    // sanitize_output below would strip those markers.
-                                    if let Ok(mut guard) = scanners.lock() {
-                                        if let Some(scanner) = guard.get_mut(&sid) {
-                                            scanner.scan_chunk(bytes, &sid, app);
+                                    // 3.0: single pipeline through UnifiedStreamCore
+                                    if let Ok(mut guard) = stream_cores.lock() {
+                                        if let Some(core) = guard.get_mut(&sid) {
+                                            core.process_chunk(bytes, &sid, app);
                                         }
                                     }
-
-                                    // Run StreamCleaner on the RAW stream to produce a pure
-                                    // Blocks-only output (prompt + user input echoes stripped).
-                                    let block_text = if let Ok(mut guard) = cleaners.lock() {
-                                        guard
-                                            .get_mut(&sid)
-                                            .map(|c| c.process_chunk(bytes))
-                                            .unwrap_or_default()
-                                    } else {
-                                        String::new()
-                                    };
-                                    if !block_text.is_empty() {
-                                        let _ = app.emit("block-output", serde_json::json!({
-                                            "session_id": sid,
-                                            "data": block_text
-                                        }));
-                                    }
-
-                                    // Then emit a sanitized pty-output to the frontend so that
-                                    // Terminal mode still receives a faithful interactive stream.
-                                    let raw = String::from_utf8_lossy(bytes).to_string();
-                                    let text = sanitize_output(raw);
-                                    let _ = app.emit("pty-output", serde_json::json!({
-                                        "session_id": sid,
-                                        "data": text
-                                    }));
                                 }
                             }
                             Some(russh::ChannelMsg::Eof) | None => {
                                 if let Some(ref app) = app {
-                                    let _ = app.emit("session-ended", serde_json::json!({
-                                        "session_id": sid
-                                    }));
+                                    event::session_ended(&sid).emit(app);
                                 }
                                 break;
                             }
@@ -283,7 +239,6 @@ impl ConnectionManager {
                 }
             }
             let _ = channel.close().await;
-            // Keep handle alive so the SSH session doesn't drop
             drop(handle);
         });
 
@@ -331,7 +286,7 @@ impl ConnectionManager {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         if let Some(ref app) = app {
-                            let _ = app.emit("session-ended", serde_json::json!({ "session_id": sid }));
+                            event::session_ended(&sid).emit(app);
                         }
                         break;
                     }
@@ -346,11 +301,7 @@ impl ConnectionManager {
 
                         if !clean_data.is_empty() {
                             if let Some(ref app) = app {
-                                let data = String::from_utf8_lossy(&clean_data).to_string();
-                                let _ = app.emit("pty-output", serde_json::json!({
-                                    "session_id": sid,
-                                    "data": data
-                                }));
+                                event::output(&sid, String::from_utf8_lossy(&clean_data)).emit(app);
                             }
                         }
                     }
@@ -362,11 +313,8 @@ impl ConnectionManager {
                         if !flag.load(Ordering::Relaxed) {
                             warn!(session_id = %sid, error = %e, "Telnet read error");
                             if let Some(ref app) = app {
-                                let _ = app.emit("session-error", serde_json::json!({
-                                    "session_id": sid,
-                                    "error": e.to_string()
-                                }));
-                                let _ = app.emit("session-ended", serde_json::json!({ "session_id": sid }));
+                                event::session_error(&sid, e.to_string()).emit(app);
+                                event::session_ended(&sid).emit(app);
                             }
                         }
                         break;
@@ -444,17 +392,13 @@ impl ConnectionManager {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         if let Some(ref app) = app {
-                            let _ = app.emit("session-ended", serde_json::json!({ "session_id": sid }));
+                            event::session_ended(&sid).emit(app);
                         }
                         break;
                     }
                     Ok(n) => {
                         if let Some(ref app) = app {
-                            let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                            let _ = app.emit("pty-output", serde_json::json!({
-                                "session_id": sid,
-                                "data": data
-                            }));
+                            event::output(&sid, String::from_utf8_lossy(&buf[..n])).emit(app);
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
@@ -465,11 +409,8 @@ impl ConnectionManager {
                         if !flag.load(Ordering::Relaxed) {
                             warn!(session_id = %sid, error = %e, "Serial read error");
                             if let Some(ref app) = app {
-                                let _ = app.emit("session-error", serde_json::json!({
-                                    "session_id": sid,
-                                    "error": e.to_string()
-                                }));
-                                let _ = app.emit("session-ended", serde_json::json!({ "session_id": sid }));
+                                event::session_error(&sid, e.to_string()).emit(app);
+                                event::session_ended(&sid).emit(app);
                             }
                         }
                         break;
@@ -493,7 +434,6 @@ impl ConnectionManager {
     // ─── Write / Resize / Disconnect ────────────────────────
 
     pub fn write_input(&self, session_id: &str, data: &[u8]) -> Result<()> {
-        // 诊断用：确认前端 invoke→后端只收到 1 次。
         tracing::debug!(
             session_id = %session_id,
             bytes = data.len(),
@@ -508,12 +448,6 @@ impl ConnectionManager {
         Ok(())
     }
 
-    /// Execute a command in block mode on a remote connection session
-    /// (currently only SSH is supported; Telnet / Serial lack shell semantics
-    /// required for OSC 7701 wrapping).
-    ///
-    /// Writes an OSC 7701 wrapped command to the remote shell so the inbound
-    /// marker scanner can detect command start/end and emit block-cmd-* events.
     pub fn execute_block_command(&self, session_id: &str, command: &str) -> Result<String> {
         if !session_id.starts_with("ssh-") {
             anyhow::bail!("Blocks mode is only supported for SSH connection sessions");
@@ -522,9 +456,6 @@ impl ConnectionManager {
         let session = sessions.get(session_id)
             .ok_or_else(|| anyhow::anyhow!("Connection session not found: {}", session_id))?;
 
-        // Remote shell type is unknown; default to Bash (compatible with zsh /
-        // sh via POSIX printf). Fish / csh / Windows remote shells are not
-        // supported yet — documented as a known limitation.
         let shell_type = ShellType::Bash;
         let command_id = block::generate_command_id();
         let wrapped = block::wrap_command(shell_type, &command_id, command);
@@ -558,13 +489,8 @@ impl ConnectionManager {
         } else {
             warn!(session_id = %session_id, "Disconnect: session not found");
         }
-        // Drop the marker scanner for this session (if any)
-        if let Ok(mut s) = self.scanners.lock() {
-            s.remove(session_id);
-        }
-        // Drop the stream cleaner for this session (if any)
-        if let Ok(mut c) = self.cleaners.lock() {
-            c.remove(session_id);
+        if let Ok(mut cores) = self.stream_cores.lock() {
+            cores.remove(session_id);
         }
         Ok(())
     }

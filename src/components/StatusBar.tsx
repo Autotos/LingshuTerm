@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { useSessionStore } from '@/stores/sessionStore';
-import { getProtocolFromSessionId } from '@/lib/sessionUtils';
 
 interface StatusBarProps {
   sessionId: string | null;
@@ -18,7 +17,6 @@ export function StatusBar({ sessionId }: StatusBarProps) {
   }, []);
 
   const activeSession = sessionId ? sessions.get(sessionId) : null;
-  const protocol = sessionId ? getProtocolFromSessionId(sessionId).toUpperCase() : '';
 
   return (
     <div className="h-6 bg-[var(--deep)] border-t border-[var(--border)] px-4 flex items-center gap-6 text-[10px] text-[var(--text-4)] flex-shrink-0">
@@ -27,17 +25,12 @@ export function StatusBar({ sessionId }: StatusBarProps) {
       <span className="flex items-center gap-1">main</span>
       <span className="w-px h-[10px] bg-[var(--border)]" />
       <span className="flex items-center gap-1">UTF-8</span>
-      {activeSession?.connectionType && (
+      {activeSession && activeSession.terminals.length > 0 && (
         <>
           <span className="w-px h-[10px] bg-[var(--border)]" />
           <span className="flex items-center gap-1 text-[var(--accent)]">
-            {protocol}
+            {activeSession.terminals.length} terminal{activeSession.terminals.length !== 1 ? 's' : ''}
           </span>
-          {activeSession.connectionName && (
-            <span className="flex items-center gap-1">
-              {activeSession.connectionName}
-            </span>
-          )}
         </>
       )}
       <span className="w-px h-[10px] bg-[var(--border)]" />

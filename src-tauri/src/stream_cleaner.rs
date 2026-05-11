@@ -263,6 +263,10 @@ fn is_noise_line(line: &str) -> bool {
     if trimmed.starts_with("__ls_rc") || trimmed.starts_with("$__ls_rc") {
         return true;
     }
+    // `PROMPT_COMMAND=…` (block command wrapper echo)
+    if trimmed.contains("PROMPT_COMMAND=") {
+        return true;
+    }
     false
 }
 

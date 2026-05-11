@@ -75,5 +75,9 @@ export function useEditor({ containerRef, language = 'plaintext', value = '', on
     return instanceRef.current?.editor.getValue() ?? '';
   }, []);
 
-  return { setValue, getValue };
+  const layout = useCallback(() => {
+    instanceRef.current?.editor.layout();
+  }, []);
+
+  return { setValue, getValue, layout };
 }

@@ -1,10 +1,16 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Minus, Square, X, Settings, FolderTree } from 'lucide-react';
+import { Minus, Square, X, Settings, FolderTree, Code2 } from 'lucide-react';
 import { useUiStore } from '@/stores/uiStore';
 
 const appWindow = getCurrentWindow();
 
-export function TitleBar({ sessionName }: { sessionName: string }) {
+interface TitleBarProps {
+  sessionName: string;
+  isEditorVisible: boolean;
+  onToggleEditor: () => void;
+}
+
+export function TitleBar({ sessionName, isEditorVisible, onToggleEditor }: TitleBarProps) {
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const toggleSessionManager = useUiStore((s) => s.toggleSessionManager);
   return (
@@ -34,6 +40,18 @@ export function TitleBar({ sessionName }: { sessionName: string }) {
         <span className="text-[11px] text-[var(--text-3)]" data-tauri-drag-region>{sessionName}</span>
       </div>
       <div className="flex items-center gap-0.5 px-1">
+        <button
+          onClick={onToggleEditor}
+          title={isEditorVisible ? 'Close editor' : 'Open code editor'}
+          className={`w-7 h-7 flex items-center justify-center rounded border transition-all ${
+            isEditorVisible
+              ? 'text-[var(--text-1)] bg-[var(--veil)] border-[var(--border)]'
+              : 'border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)]'
+          }`}
+          aria-pressed={isEditorVisible}
+        >
+          <Code2 className="w-[14px] h-[14px]" />
+        </button>
         <button
           onClick={toggleSessionManager}
           className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"

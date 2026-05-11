@@ -1,3 +1,11 @@
+/**
+ * @deprecated Since 3.0.  Use {@link useSessionLogStore} from `@/stores/sessionLogStore`
+ * instead.  The unified SessionEvent timeline replaces the CommandBlock array.
+ *
+ * This store is kept for backward compatibility with legacy code; new features
+ * should read from sessionLogStore and derive CommandGroup[] via
+ * `deriveCommandGroups()`.
+ */
 import { useMemo } from 'react';
 import { create } from 'zustand';
 import type { CommandBlock, CommandBlockStatus } from '@/models/block';

@@ -1,49 +1,48 @@
 /**
  * Session 持久化薄封装
  *
- * 对应 src-tauri/src/persistence.rs 中的 7 个 invoke 命令。
- * 仅做「类型 + invoke 转发 + JSON 序列化」，不在此文件做 debounce / 订阅，
- * 那些由 Task 7 的订阅层负责。
+ * 对应 src-tauri/src/persistence.rs 中的 invoke 命令。
+ *
+ * 3.0 新增:
+ *   - append_timeline_batch  →  批量追加 session.timeline.ndjson
+ *   - load_timeline          →  读取 timeline 尾部行
+ *   - save_timeline_snapshot →  全量替换 timeline (用于 flush)
+ *
+ * 旧命令保留兼容 2.0 代码路径。
  */
 import { invoke } from '@tauri-apps/api/core';
 
 import type { BlocksData, EditorData, SessionMode } from '@/models/sessionData';
 
-/** 与 Rust 端保持一致的 meta 结构（可按需扩展） */
+// ─── Meta / Blocks / Editor (2.0 compat) ──────────────────────
+
 export interface SessionMetaPayload {
   id: string;
   name: string;
   mode: SessionMode;
   createdAt: string;
   lastAccessed: string;
-  /** 透传 SessionInfo 里的其它非敏感字段 */
-  shell?: string;
-  cwd?: string;
   status?: string;
-  connectionType?: string;
-  connectionName?: string;
+  terminals?: Array<{ id: string; title: string; connectionId: string; config: any }>;
 }
 
-/** terminal.ndjson 每一行的记录结构 */
 export interface TerminalLogEntry {
-  /** 毫秒时间戳 */
   ts: number;
-  /** stdout / stderr / input / system */
   stream: 'stdout' | 'stderr' | 'input' | 'system';
-  /** 原始文本（可含 ANSI） */
   data: string;
 }
 
-/** load_session 的返回值结构，与 Rust 端 SessionSnapshot 对应 */
 export interface SessionSnapshot {
   session_id: string;
   meta: SessionMetaPayload | null;
   blocks: BlocksData | null;
   editor: EditorData | null;
   terminal_tail: string[];
+  /** 3.0: timeline ndjson tail lines (if available). */
+  timeline_tail?: string[];
 }
 
-// ---------------------------- Commands ----------------------------
+// ─── 2.0 commands (kept for backward compat) ──────────────────
 
 export function saveSessionMeta(sessionId: string, meta: SessionMetaPayload): Promise<void> {
   return invoke('save_session_meta', { sessionId, meta });
@@ -57,9 +56,6 @@ export function saveSessionEditor(sessionId: string, editor: EditorData): Promis
   return invoke('save_session_editor', { sessionId, editor });
 }
 
-/**
- * 追加一条终端日志。传入结构化对象，由本函数负责 stringify 并交由 Rust 追加 `\n`。
- */
 export function appendTerminalLog(sessionId: string, entry: TerminalLogEntry): Promise<void> {
   return invoke('append_terminal_log', {
     sessionId,
@@ -67,9 +63,6 @@ export function appendTerminalLog(sessionId: string, entry: TerminalLogEntry): P
   });
 }
 
-/**
- * 批量追加多条终端日志（单次 invoke，消减高频调用的性能抗抗代价）。
- */
 export function appendTerminalBatch(
   sessionId: string,
   entries: TerminalLogEntry[],
@@ -81,10 +74,6 @@ export function appendTerminalBatch(
   });
 }
 
-/**
- * 加载指定 session 的完整快照。
- * @param tailLimit  读取 terminal.ndjson 的尾部行数上限，默认 Rust 侧 2000
- */
 export function loadSession(sessionId: string, tailLimit?: number): Promise<SessionSnapshot> {
   return invoke('load_session', { sessionId, tailLimit });
 }
@@ -97,11 +86,82 @@ export function clearSession(sessionId: string): Promise<void> {
   return invoke('clear_session', { sessionId });
 }
 
-// -------------------------- 解析辅助 --------------------------
+/** Export session data to a standalone JSON file in the workspace root. */
+export function saveSessionExport(
+  sessionId: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  return invoke('save_session_export', { sessionId, data });
+}
+
+// ─── 4.0 Unified session.json ──────────────────────────────────
+
+export interface SessionJsonEntry {
+  id: string;
+  name: string;
+  terminals: Array<{
+    id: string;
+    name: string;
+    type: string;
+    config?: unknown;
+    [key: string]: unknown;
+  }>;
+}
+
+export interface SessionJsonFile {
+  sessions: SessionJsonEntry[];
+}
+
+/** Load the unified session.json from the workspace root. */
+export function loadSessions(): Promise<SessionJsonFile> {
+  return invoke<SessionJsonFile>('load_sessions');
+}
+
+/** Save the unified session.json to the workspace root (atomic). */
+export function saveSessions(data: SessionJsonFile): Promise<void> {
+  return invoke('save_sessions', { data });
+}
+
+// ─── 3.0 Timeline commands ────────────────────────────────────
 
 /**
- * 安全解析 terminal_tail 的每一行 NDJSON。
- * 非法行会被跳过而不是抛错，保证回放不会因为一行脏数据全挂。
+ * Batch-append timeline entries to session.timeline.ndjson.
+ * Each entry is already a single-line JSON string.
+ */
+export function appendTimelineBatch(
+  sessionId: string,
+  entries: string[],
+): Promise<void> {
+  if (entries.length === 0) return Promise.resolve();
+  return invoke('append_timeline_batch', {
+    sessionId,
+    entries,
+  });
+}
+
+/**
+ * Load timeline tail lines from session.timeline.ndjson.
+ * Reuses the Rust `load_session` pipeline — timeline_tail is the
+ * terminal_tail field under the new filename.
+ */
+export async function loadTimeline(
+  sessionId: string,
+  tailLimit?: number,
+): Promise<{ lines: string[] }> {
+  const snap = await invoke<SessionSnapshot>('load_session', {
+    sessionId,
+    tailLimit,
+  });
+  return {
+    lines: snap.timeline_tail ?? snap.terminal_tail ?? [],
+  };
+}
+
+// ─── Helpers ──────────────────────────────────────────────────
+
+/**
+ * Safely parse NDJSON lines into TerminalLogEntry[].
+ * Invalid lines are skipped rather than throwing.
  */
 export function parseTerminalTail(lines: string[]): TerminalLogEntry[] {
   const out: TerminalLogEntry[] = [];
@@ -112,7 +172,6 @@ export function parseTerminalTail(lines: string[]): TerminalLogEntry[] {
       const obj = JSON.parse(trimmed) as TerminalLogEntry;
       if (typeof obj?.data === 'string') out.push(obj);
     } catch {
-      // 容错：把非 JSON 行当作 stdout 裸文本
       out.push({ ts: Date.now(), stream: 'stdout', data: trimmed });
     }
   }

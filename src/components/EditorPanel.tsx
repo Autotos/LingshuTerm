@@ -5,6 +5,7 @@ import { useEditorStore, useSessionEditor } from '@/stores/editorStore';
 
 interface EditorPanelProps {
   sessionId: string | null;
+  isVisible?: boolean;
 }
 
 const WELCOME_PATH = 'welcome.md';
@@ -15,7 +16,7 @@ This virtual workspace is scoped to the current session.
 - Switch sessions from the sidebar to load the respective workspace.
 `;
 
-export function EditorPanel({ sessionId }: EditorPanelProps) {
+export function EditorPanel({ sessionId, isVisible }: EditorPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const editorData = useSessionEditor(sessionId);
@@ -46,12 +47,20 @@ export function EditorPanel({ sessionId }: EditorPanelProps) {
     [sessionId, activePath, updateFile],
   );
 
-  const { setValue } = useEditor({
+  const { setValue, layout } = useEditor({
     containerRef,
     language: 'plaintext',
     value: activeContent,
     onChange: handleChange,
   });
+
+  // Trigger layout when editor becomes visible (prevents blank/glitched rendering)
+  useEffect(() => {
+    if (isVisible) {
+      const raf = requestAnimationFrame(() => layout());
+      return () => cancelAnimationFrame(raf);
+    }
+  }, [isVisible, layout]);
 
   // 切换 activeFile 或外部内容变化时，同步到 Monaco
   useEffect(() => {

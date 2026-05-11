@@ -28,6 +28,27 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     instanceIdRef.current = ++__useTerminalHookCounter.n;
   }
 
+  // Input buffering: hold keystrokes until setConnectionReady() is called
+  const connectionReadyRef = useRef(false);
+  const inputBufferRef = useRef<string[]>([]);
+
+  const flushInputBuffer = useCallback(() => {
+    const buf = inputBufferRef.current;
+    if (buf.length === 0 || !sessionId) return;
+    const data = buf.join('');
+    inputBufferRef.current = [];
+    invoke(getWriteCommand(sessionId), { sessionId, data }).catch((err) =>
+      console.error('[useTerminal] flushInputBuffer failed:', err),
+    );
+    buf.forEach((chunk) => persistTerminalChunk(sessionId, 'input', chunk));
+  }, [sessionId]);
+
+  const setConnectionReady = useCallback(() => {
+    if (connectionReadyRef.current) return;
+    connectionReadyRef.current = true;
+    flushInputBuffer();
+  }, [flushInputBuffer]);
+
   // Initialize terminal
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) return;
@@ -89,8 +110,9 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       webglAddon = null;
     }
 
-    // 3) 延迟到下一帧再 fit，避免容器宽高为 0 导致渲染异常
-    const rafId = requestAnimationFrame(() => {
+    // 3) Delayed fit — size correctly before any output renders.
+    // Focus is handled later by UnifiedSessionPanel when the connection is ready.
+    const timer = setTimeout(() => {
       try {
         if (container.clientWidth > 0 && container.clientHeight > 0) {
           fitAddon.fit();
@@ -98,13 +120,13 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       } catch (e) {
         console.warn('fitAddon.fit() failed:', e);
       }
-    });
+    }, 80);
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
     return () => {
-      cancelAnimationFrame(rafId);
+      clearTimeout(timer);
       // 先卸载 WebGL，再 dispose terminal，并用 try/catch 容忍 StrictMode 下的重复调用
       try {
         webglAddonRef.current?.dispose();
@@ -138,14 +160,15 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
   //   3) 若 await 期间已 cancelled，立即 unlisten 新返回的句柄，防止泄漏。
   useEffect(() => {
     if (!terminalRef.current) return;
-    const hid = instanceIdRef.current;
+
+    // Reset connection state for the new PTY
+    connectionReadyRef.current = false;
+    inputBufferRef.current = [];
 
     let cancelled = false;
     const localUnlisteners: UnlistenFn[] = [];
 
     (async () => {
-      console.debug('[useTerminal#%d] setup start sid=%s', hid, sessionId);
-
       const unlistenOutput = await listen<PtyOutputPayload>(
         'pty-output',
         (event) => {
@@ -154,18 +177,13 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
             terminalRef.current &&
             event.payload.session_id === sessionId
           ) {
-            console.debug(
-              '[useTerminal#%d] pty-output WRITE sid=%s bytes=%d',
-              hid, event.payload.session_id, event.payload.data.length,
-            );
             terminalRef.current.write(event.payload.data);
-            // 异步追加到 NDJSON（失败仅 debug，不阻塞渲染）
             persistTerminalChunk(sessionId, 'stdout', event.payload.data);
           }
         },
       );
       if (cancelled) {
-        unlistenOutput();
+        try { unlistenOutput(); } catch { /* Tauri may already have cleaned up */ }
         return;
       }
       localUnlisteners.push(unlistenOutput);
@@ -186,25 +204,16 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
         },
       );
       if (cancelled) {
-        unlistenError();
+        try { unlistenError(); } catch { /* Tauri may already have cleaned up */ }
         return;
       }
       localUnlisteners.push(unlistenError);
-
-      console.debug(
-        '[useTerminal#%d] setup complete sid=%s listeners=%d',
-        hid, sessionId, localUnlisteners.length,
-      );
     })();
 
     return () => {
       cancelled = true;
-      console.debug(
-        '[useTerminal#%d] cleanup disposing=%d sid=%s',
-        hid, localUnlisteners.length, sessionId,
-      );
       for (const unlisten of localUnlisteners) {
-        unlisten();
+        try { unlisten(); } catch { /* Tauri may already have cleaned up */ }
       }
       localUnlisteners.length = 0;
     };
@@ -216,12 +225,15 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
 
     const terminal = terminalRef.current;
 
-    const hid = instanceIdRef.current;
     const onData = terminal.onData(async (data: string) => {
-      console.debug(
-        '[useTerminal#%d] onData sid=%s bytes=%d',
-        hid, sessionId, data.length,
-      );
+      if (!connectionReadyRef.current) {
+        inputBufferRef.current.push(data);
+        return;
+      }
+      // Flush any remaining buffer first (belt-and-suspenders)
+      if (inputBufferRef.current.length > 0) {
+        flushInputBuffer();
+      }
       try {
         await invoke(getWriteCommand(sessionId), { sessionId, data });
         persistTerminalChunk(sessionId, 'input', data);
@@ -298,9 +310,13 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
 
   return {
     terminal: terminalRef.current,
+    /** The internal ref — always has the live Terminal after init, unlike
+     *  `terminal` which is frozen to the first render's null value. */
+    terminalRef,
     createSession,
     fit,
     clear,
     getSelection,
+    setConnectionReady,
   };
 }

@@ -1,11 +1,12 @@
 //! Session 持久化模块
 //!
-//! 目录布局：
+//! 目录布局 (3.0):
 //!   {HOME}/.LingShuTerm/workspace/sessions/{session_id}/
-//!     ├─ meta.json      # Session 元信息（id/name/mode/createdAt/lastAccessed 等）
-//!     ├─ blocks.json    # Blocks 视图数据（tasks/currentFlow）
-//!     ├─ editor.json    # Editor 视图数据（files/openFiles/activeFile/theme）
-//!     └─ terminal.ndjson # Terminal 日志，每行一个 JSON 记录，追加写
+//!     ├─ meta.json                  # Session 元信息
+//!     ├─ blocks.json                # [2.0 compat] Blocks 视图数据
+//!     ├─ editor.json                # Editor 视图数据
+//!     ├─ terminal.ndjson            # [2.0 compat] Terminal 日志
+//!     └─ session.timeline.ndjson    # [3.0] 统一 SessionEvent 时间线
 //!
 //! 所有 IO 均为异步（tokio::fs）；写 JSON 时先写到 .tmp 再 rename 原子替换，
 //! 避免进程崩溃导致文件半截损坏。
@@ -27,6 +28,8 @@ const META_FILE: &str = "meta.json";
 const BLOCKS_FILE: &str = "blocks.json";
 const EDITOR_FILE: &str = "editor.json";
 const TERMINAL_FILE: &str = "terminal.ndjson";
+const TIMELINE_FILE: &str = "session.timeline.ndjson";
+const SESSION_JSON: &str = "session.json";
 
 /// 默认读取的终端日志尾部行数上限
 const DEFAULT_TERMINAL_TAIL: usize = 2000;
@@ -61,6 +64,11 @@ fn app_sessions_root(_app: &AppHandle) -> Result<PathBuf, String> {
 fn session_dir(app: &AppHandle, session_id: &str) -> Result<PathBuf, String> {
     validate_session_id(session_id)?;
     Ok(app_sessions_root(app)?.join(session_id))
+}
+
+/// Public entry point for `stream::log` — returns the session directory path.
+pub fn session_dir_public(app: &AppHandle, session_id: &str) -> Result<PathBuf, String> {
+    session_dir(app, session_id)
 }
 
 async fn ensure_dir(path: &Path) -> Result<(), String> {
@@ -198,8 +206,41 @@ pub async fn append_terminal_batch(
     Ok(())
 }
 
+/// 批量追加到 session.timeline.ndjson (3.0 unified log)。
+#[tauri::command]
+pub async fn append_timeline_batch(
+    app: AppHandle,
+    session_id: String,
+    entries: Vec<String>,
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let dir = session_dir(&app, &session_id)?;
+    ensure_dir(&dir).await?;
+    let path = dir.join(TIMELINE_FILE);
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+        .map_err(|e| format!("open {:?} failed: {}", path, e))?;
+
+    let mut buf = String::with_capacity(entries.iter().map(|e| e.len() + 1).sum());
+    for entry in entries {
+        let s = entry.trim_end_matches(['\r', '\n']);
+        buf.push_str(s);
+        buf.push('\n');
+    }
+    file.write_all(buf.as_bytes())
+        .await
+        .map_err(|e| format!("append_timeline to {:?} failed: {}", path, e))?;
+    Ok(())
+}
+
 /// 读取 terminal.ndjson 的尾部若干行
-async fn read_terminal_tail(path: &Path, limit: usize) -> Result<Vec<String>, String> {
+pub async fn read_terminal_tail_public(path: &Path, limit: usize) -> Result<Vec<String>, String> {
     let file = match fs::File::open(path).await {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -229,6 +270,9 @@ pub struct SessionSnapshot {
     pub blocks: Option<Value>,
     pub editor: Option<Value>,
     pub terminal_tail: Vec<String>,
+    /// 3.0: unified timeline from session.timeline.ndjson
+    #[serde(default)]
+    pub timeline_tail: Vec<String>,
 }
 
 #[tauri::command]
@@ -245,17 +289,26 @@ pub async fn load_session(
             blocks: None,
             editor: None,
             terminal_tail: Vec::new(),
+            timeline_tail: Vec::new(),
         });
     }
 
     let meta = read_json_if_exists(&dir.join(META_FILE)).await?;
     let blocks = read_json_if_exists(&dir.join(BLOCKS_FILE)).await?;
     let editor = read_json_if_exists(&dir.join(EDITOR_FILE)).await?;
-    let terminal_tail = read_terminal_tail(
+    let terminal_tail = read_terminal_tail_public(
         &dir.join(TERMINAL_FILE),
         tail_limit.unwrap_or(DEFAULT_TERMINAL_TAIL),
     )
     .await?;
+
+    // 3.0: Also read the unified timeline if it exists; fall back empty.
+    let timeline_tail = read_terminal_tail_public(
+        &dir.join(TIMELINE_FILE),
+        tail_limit.unwrap_or(DEFAULT_TERMINAL_TAIL),
+    )
+    .await
+    .unwrap_or_default();
 
     Ok(SessionSnapshot {
         session_id,
@@ -263,6 +316,7 @@ pub async fn load_session(
         blocks,
         editor,
         terminal_tail,
+        timeline_tail,
     })
 }
 
@@ -295,6 +349,104 @@ pub async fn list_sessions(app: AppHandle) -> Result<Vec<String>, String> {
         }
     }
     Ok(ids)
+}
+
+/// Export session data to a standalone JSON file in the workspace root.
+/// Writes to `{workspace}/{sessionId}.json` with atomic tmp+rename.
+#[tauri::command]
+pub async fn save_session_export(
+    _app: AppHandle,
+    session_id: String,
+    data: Value,
+) -> Result<(), String> {
+    let ws = workspace_dir()?;
+    ensure_dir(&ws).await?;
+    let target = ws.join(format!("{}.json", session_id));
+    atomic_write_json(&target, &data).await
+}
+
+/// Load the unified session.json from the workspace root.
+/// On first run, migrates old per-session directories into the new format.
+#[tauri::command]
+pub async fn load_sessions(app: AppHandle) -> Result<Value, String> {
+    let ws = workspace_dir()?;
+    let path = ws.join(SESSION_JSON);
+
+    if path.exists() {
+        let bytes = fs::read(&path)
+            .await
+            .map_err(|e| format!("read session.json: {}", e))?;
+        let v: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("parse session.json: {}", e))?;
+        return Ok(v);
+    }
+
+    // No session.json yet — try migrating from old per-session directories
+    let old_root = ws.join(SESSIONS_DIR);
+    if fs::try_exists(&old_root).await.unwrap_or(false) {
+        let migrated = migrate_old_sessions(&app, &old_root, &ws).await?;
+        // Auto-save the migrated data so next load is fast
+        atomic_write_json(&path, &migrated).await?;
+        return Ok(migrated);
+    }
+
+    // Fresh start — return empty
+    Ok(serde_json::json!({ "sessions": [] }))
+}
+
+/// Save the unified session.json to the workspace root (atomic).
+#[tauri::command]
+pub async fn save_sessions(
+    _app: AppHandle,
+    data: Value,
+) -> Result<(), String> {
+    let ws = workspace_dir()?;
+    ensure_dir(&ws).await?;
+    let target = ws.join(SESSION_JSON);
+    atomic_write_json(&target, &data).await
+}
+
+/// Migrate old per-session `meta.json` files into the unified session.json format.
+async fn migrate_old_sessions(_app: &AppHandle, old_root: &Path, _ws: &Path) -> Result<Value, String> {
+    let mut rd = fs::read_dir(old_root)
+        .await
+        .map_err(|e| format!("read_dir old sessions: {}", e))?;
+
+    let mut sessions: Vec<Value> = Vec::new();
+
+    while let Some(entry) = rd
+        .next_entry()
+        .await
+        .map_err(|e| format!("iterate old sessions: {}", e))?
+    {
+        let file_type = match entry.file_type().await {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let meta_path = entry.path().join(META_FILE);
+        if let Ok(Some(meta_value)) = read_json_if_exists(&meta_path).await {
+            // Read terminals from the meta if present; otherwise empty
+            let terminals = meta_value
+                .get("terminals")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+
+            let session = serde_json::json!({
+                "id": meta_value.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                "name": meta_value.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "terminals": terminals,
+            });
+            sessions.push(session);
+        }
+    }
+
+    tracing::info!("Migrated {} old sessions to session.json", sessions.len());
+
+    // Don't delete old dirs — keep as backup
+    Ok(serde_json::json!({ "sessions": sessions }))
 }
 
 #[tauri::command]

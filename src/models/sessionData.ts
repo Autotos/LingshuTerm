@@ -2,10 +2,86 @@ import type { CommandBlock } from './block';
 import type { TaskGroup } from './task';
 import type { SessionInfo } from './session';
 
+/** UI rendering mode for a session. */
+export type SessionMode = 'terminal' | 'editor';
+
+// ─── 3.0 Unified Session Event types ───────────────────────────
+
+export type SessionEventType =
+  | 'input'
+  | 'output'
+  | 'command-start'
+  | 'command-end'
+  | 'block-output'
+  | 'system';
+
+export interface SessionEvent {
+  id: string;
+  sessionId: string;
+  type: SessionEventType;
+  data: unknown;
+  ts: number;
+}
+
+/** Derived: a group of events forming one command block. */
+export interface CommandGroup {
+  id: string;
+  command: string;
+  output: string;
+  status: 'running' | 'success' | 'error';
+  exitCode: number | null;
+  startedAt: number | null;
+  completedAt: number | null;
+}
+
 /**
- * 一个 Session 可以处于三种展示模式之一，影响主区域视图
+ * Derive CommandGroup[] from a flat SessionEvent[] timeline.
+ * Transforms the unified log into block-structured data for display.
  */
-export type SessionMode = 'terminal' | 'blocks' | 'editor';
+export function deriveCommandGroups(events: SessionEvent[]): CommandGroup[] {
+  const groups: CommandGroup[] = [];
+  let current: CommandGroup | null = null;
+
+  for (const ev of events) {
+    if (ev.type === 'command-start') {
+      const d = ev.data as { commandId: string; command: string };
+      current = {
+        id: d.commandId,
+        command: d.command,
+        output: '',
+        status: 'running',
+        exitCode: null,
+        startedAt: ev.ts,
+        completedAt: null,
+      };
+    } else if (ev.type === 'command-end' && current) {
+      const d = ev.data as { commandId: string; exitCode: number };
+      current.status = d.exitCode === 0 ? 'success' : 'error';
+      current.exitCode = d.exitCode;
+      current.completedAt = ev.ts;
+      groups.push(current);
+      current = null;
+    } else if (ev.type === 'block-output' && current) {
+      current.output += (ev.data as { data: string }).data ?? (ev.data as string) ?? '';
+    }
+  }
+
+  // Flush any unterminated command
+  if (current) {
+    current.status = 'error';
+    current.exitCode = -1;
+    current.completedAt = Date.now();
+    groups.push(current);
+  }
+
+  return groups;
+}
+
+/** Generate a unique event ID. */
+let _evtCounter = 0;
+export function generateEventId(): string {
+  return `evt-${Date.now()}-${++_evtCounter}`;
+}
 
 /**
  * Terminal 模式下的派生数据

@@ -14,9 +14,9 @@ use std::{
 use tauri::{AppHandle, Emitter};
 use tracing::{error, info, warn};
 
-use crate::block::{self, MarkerScanner, ShellType};
-use crate::output_sanitizer::sanitize_output;
-use crate::stream_cleaner::StreamCleaner;
+use crate::block::{self, ShellType};
+use crate::stream::core::UnifiedStreamCore;
+use crate::stream::event;
 
 /// Wrapper to make non-Send/Sync PTY types safe behind a lock.
 /// Safety: All access to inner values is guarded by RwLock on the sessions HashMap.
@@ -39,10 +39,8 @@ pub struct PtyManager {
     sessions: Arc<RwLock<HashMap<String, TerminalSession>>>,
     next_id: AtomicUsize,
     app_handle: Arc<RwLock<Option<AppHandle>>>,
-    /// Per-session marker scanners for block command detection
-    scanners: Arc<std::sync::Mutex<HashMap<String, MarkerScanner>>>,
-    /// Per-session OSC 133 stream cleaners (pure Blocks output extractor)
-    cleaners: Arc<std::sync::Mutex<HashMap<String, StreamCleaner>>>,
+    /// Per-session unified stream cores (replaces separate MarkerScanner + StreamCleaner maps).
+    stream_cores: Arc<std::sync::Mutex<HashMap<String, UnifiedStreamCore>>>,
 }
 
 impl PtyManager {
@@ -51,8 +49,7 @@ impl PtyManager {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             next_id: AtomicUsize::new(1),
             app_handle: Arc::new(RwLock::new(None)),
-            scanners: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            cleaners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            stream_cores: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -97,22 +94,17 @@ impl PtyManager {
 
         info!("Created session {} with shell: {}", session_id, shell_path);
 
-        // Initialize a marker scanner for this session
-        if let Ok(mut scanners) = self.scanners.lock() {
-            scanners.insert(session_id.clone(), MarkerScanner::new());
-        }
-        // Initialize a stream cleaner for this session (OSC 133 state machine)
-        if let Ok(mut cleaners) = self.cleaners.lock() {
-            cleaners.insert(session_id.clone(), StreamCleaner::new());
+        // Initialize the unified stream core for this session
+        if let Ok(mut cores) = self.stream_cores.lock() {
+            cores.insert(session_id.clone(), UnifiedStreamCore::new());
         }
 
-        // Spawn reader task to continuously read PTY output
+        // Spawn reader task
         if let Some(app) = self.app_handle.read().clone() {
             let sid = session_id.clone();
-            let scanners = Arc::clone(&self.scanners);
-            let cleaners = Arc::clone(&self.cleaners);
+            let cores = Arc::clone(&self.stream_cores);
             std::thread::spawn(move || {
-                Self::read_pty_output(reader, &sid, &app, scanners, cleaners);
+                Self::read_pty_output(reader, &sid, &app, cores);
             });
         }
 
@@ -143,7 +135,6 @@ impl PtyManager {
 
     /// Write input to PTY
     pub fn write_input(&self, session_id: &str, data: &[u8]) -> Result<()> {
-        // 诊断用：确认"每次前端 invoke 后端只收到 1 次"——排除后端双写嫌疑。
         tracing::debug!(
             session_id = %session_id,
             bytes = data.len(),
@@ -180,13 +171,8 @@ impl PtyManager {
 
     /// Destroy a PTY session
     pub fn destroy_session(&self, session_id: &str) -> Result<()> {
-        // Remove the marker scanner
-        if let Ok(mut scanners) = self.scanners.lock() {
-            scanners.remove(session_id);
-        }
-        // Remove the stream cleaner
-        if let Ok(mut cleaners) = self.cleaners.lock() {
-            cleaners.remove(session_id);
+        if let Ok(mut cores) = self.stream_cores.lock() {
+            cores.remove(session_id);
         }
 
         let mut sessions = self.sessions.write();
@@ -228,14 +214,17 @@ impl PtyManager {
         Ok(command_id)
     }
 
-    /// Read PTY output and emit events to frontend.
-    /// Also scans for OSC 7701 markers and emits block-cmd-* events.
+    /// Read PTY output and emit unified session events via UnifiedStreamCore.
+    ///
+    /// In 3.0, all output goes through a single `session-event` channel.
+    /// The UnifiedStreamCore internally runs the three-stage pipeline
+    /// (MarkerScanner → StreamCleaner → sanitize_output) and emits typed
+    /// SessionEvent variants.
     fn read_pty_output<R: std::io::Read + Send + 'static>(
         mut reader: R,
         session_id: &str,
         app: &AppHandle,
-        scanners: Arc<std::sync::Mutex<HashMap<String, MarkerScanner>>>,
-        cleaners: Arc<std::sync::Mutex<HashMap<String, StreamCleaner>>>,
+        stream_cores: Arc<std::sync::Mutex<HashMap<String, UnifiedStreamCore>>>,
     ) {
         let session_id = session_id.to_string();
         let app = app.clone();
@@ -245,57 +234,21 @@ impl PtyManager {
             match reader.read(&mut buffer) {
                 Ok(0) => {
                     info!("PTY EOF for session: {}", session_id);
-                    let _ = app.emit("session-ended", &serde_json::json!({
-                        "session_id": session_id
-                    }));
+                    event::session_ended(&session_id).emit(&app);
                     break;
                 }
                 Ok(n) => {
                     let chunk = &buffer[..n];
 
-                    // 1. Scan raw bytes for OSC 7701 markers BEFORE sanitization.
-                    //    sanitize_output would strip those markers away, so scanner must see
-                    //    the original stream to emit block-cmd-started / block-cmd-completed.
-                    if let Ok(mut scanners) = scanners.lock() {
-                        if let Some(scanner) = scanners.get_mut(&session_id) {
-                            scanner.scan_chunk(chunk, &session_id, &app);
+                    if let Ok(mut cores) = stream_cores.lock() {
+                        if let Some(core) = cores.get_mut(&session_id) {
+                            core.process_chunk(chunk, &session_id, &app);
                         }
                     }
-
-                    // 2. Run StreamCleaner (OSC 133 state machine / line-filter fallback)
-                    //    on the RAW chunk to produce the pure Blocks stream.
-                    let block_text = if let Ok(mut guard) = cleaners.lock() {
-                        guard
-                            .get_mut(&session_id)
-                            .map(|c| c.process_chunk(chunk))
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    if !block_text.is_empty() {
-                        let _ = app.emit("block-output", &serde_json::json!({
-                            "session_id": session_id,
-                            "data": block_text
-                        }));
-                    }
-
-                    // 3. Sanitize Warp integration noise (DECSET/DECRST + OSC 7701/133 +
-                    //    printf / __ls_rc helper-line echoes) before emitting to the frontend.
-                    //    This stream still contains prompts + user input echoes, which is
-                    //    required for xterm.js Terminal mode to render a faithful session.
-                    let raw = String::from_utf8_lossy(chunk).to_string();
-                    let data = sanitize_output(raw);
-                    let _ = app.emit("pty-output", &serde_json::json!({
-                        "session_id": session_id,
-                        "data": data
-                    }));
                 }
                 Err(e) => {
                     error!("Error reading PTY output: {}", e);
-                    let _ = app.emit("session-error", &serde_json::json!({
-                        "session_id": session_id,
-                        "error": e.to_string()
-                    }));
+                    event::session_error(&session_id, e.to_string()).emit(&app);
                     break;
                 }
             }

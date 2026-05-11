@@ -8,5 +8,6 @@ pub mod persistence;
 pub mod session_commands;
 pub mod shell;
 pub mod storage;
+pub mod stream;
 pub mod stream_cleaner;
 pub mod utils;

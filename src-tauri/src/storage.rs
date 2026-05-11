@@ -200,14 +200,25 @@ fn load_payload_raw() -> Result<StoragePayload, String> {
     // 先尝试新格式 { connections, groups }
     let payload: StoragePayload = match serde_json::from_slice(&bytes) {
         Ok(p) => p,
-        Err(_) => {
+        Err(e1) => {
             // 旧格式：纯数组，自动迁移
-            let entries: Vec<SavedConnectionEntry> =
-                serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("parse connections.json (legacy): {}", e))?;
-            StoragePayload {
-                connections: entries,
-                groups: Vec::new(),
+            match serde_json::from_slice::<Vec<SavedConnectionEntry>>(&bytes) {
+                Ok(entries) => StoragePayload {
+                    connections: entries,
+                    groups: Vec::new(),
+                },
+                Err(_e2) => {
+                    tracing::warn!(
+                        "connections.json is unreadable (new-format: {}, legacy: {}); starting fresh",
+                        e1,
+                        _e2
+                    );
+                    // Corrupted or empty — return empty, will be overwritten on next save
+                    return Ok(StoragePayload {
+                        connections: Vec::new(),
+                        groups: Vec::new(),
+                    });
+                }
             }
         }
     };

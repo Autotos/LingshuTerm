@@ -1,3 +1,10 @@
+/**
+ * @deprecated Since 3.0.  Use {@link useSessionStream} from `@/hooks/useSessionStream`
+ * instead.  The unified `session-event` channel replaces the separate
+ * `block-cmd-started` / `block-cmd-completed` / `block-output` events.
+ *
+ * Kept for backward compatibility with legacy code.
+ */
 import { useEffect, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -103,7 +110,7 @@ export function useBlockSession({
     setup();
 
     return () => {
-      unlisteners.forEach((fn) => fn());
+      unlisteners.forEach((fn) => { try { fn(); } catch { /* Tauri may already have cleaned up */ } });
     };
   }, [sessionId, setCommandRunning, setCommandCompleted, setCommandError]);
 

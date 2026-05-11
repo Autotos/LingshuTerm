@@ -1,16 +1,19 @@
-import { ChevronLeft, ChevronRight, Monitor, ListTodo } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Monitor, ListTodo, Plus, Save, Trash2 } from 'lucide-react';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
+import { saveSessions } from '@/lib/persistenceService';
 import { TaskBoard } from './TaskBoard';
 
 export function Sidebar() {
-  const { sessions, activeSessionId, setActiveSession } = useSessionStore();
+  const { sessions, activeSessionId, setActiveSession, removeSession, restoreTerminals } =
+    useSessionStore();
   const {
     sidebarCollapsed,
     toggleSidebar,
     sidebarTab,
     setSidebarTab,
     openCreateSessionModal,
+    openTerminalModal,
   } = useUiStore();
 
   return (
@@ -62,26 +65,90 @@ export function Sidebar() {
             {Array.from(sessions.values()).map((session) => (
               <div
                 key={session.id}
-                onClick={() => setActiveSession(session.id)}
-                className={`flex items-center gap-2 px-3 py-2 rounded cursor-pointer text-xs whitespace-nowrap overflow-hidden text-ellipsis transition-all ${
+                onDoubleClick={() => {
+                  setActiveSession(session.id);
+                  restoreTerminals(session.id);
+                }}
+                className={`group flex items-center gap-1 rounded cursor-pointer text-xs whitespace-nowrap overflow-hidden transition-all ${
                   session.id === activeSessionId
                     ? 'bg-[var(--veil)] border border-[var(--border)] text-[var(--text-1)]'
                     : 'text-[var(--text-2)] hover:bg-[var(--veil)] hover:text-[var(--text-1)]'
-                } ${sidebarCollapsed ? 'justify-center px-2' : ''}`}
+                } ${sidebarCollapsed ? 'justify-center px-2 py-2' : 'px-2 py-2'}`}
               >
-                <span
-                  className={`w-[6px] h-[6px] rounded-full flex-shrink-0 ${
-                    session.status === 'connected' ? 'bg-[var(--green)]' : 'bg-[var(--accent)]'
-                  }`}
-                />
+                <div
+                  className="flex items-center gap-2 flex-1 min-w-0"
+                  onClick={() => setActiveSession(session.id)}
+                >
+                  <span
+                    className={`w-[6px] h-[6px] rounded-full flex-shrink-0 ${
+                      session.status === 'connected' ? 'bg-[var(--green)]' : 'bg-[var(--accent)]'
+                    }`}
+                  />
+                  {!sidebarCollapsed && (
+                    <span className="truncate">{session.title || session.id}</span>
+                  )}
+                </div>
                 {!sidebarCollapsed && (
-                  <span className="truncate">{session.connectionName || session.title || session.id}</span>
+                  <>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openTerminalModal(session.id);
+                      }}
+                      title="Add terminal"
+                      className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] transition-all"
+                    >
+                      <Plus className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Save ALL live sessions to the unified session.json
+                        const allSessions = useSessionStore.getState().sessions;
+                        const entries = Array.from(allSessions.values()).map((s) => ({
+                          id: s.id,
+                          name: s.title || s.id,
+                          terminals: s.terminals.map((t) => {
+                            const cfg = t.config as unknown as Record<string, unknown> | null;
+                            return {
+                              id: t.id,
+                              name: t.title,
+                              type: cfg?.protocol as string ?? 'unknown',
+                              host: cfg?.host as string | undefined,
+                              port: cfg?.port as number | undefined,
+                              user: cfg?.username as string | undefined,
+                              config: t.config,
+                            };
+                          }),
+                        }));
+                        saveSessions({ sessions: entries }).catch((err) =>
+                          console.error('Failed to save sessions:', err),
+                        );
+                      }}
+                      title="Save all sessions"
+                      className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-[var(--text-3)] hover:text-[var(--green)] hover:bg-[var(--veil)] transition-all"
+                    >
+                      <Save className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm(`Delete session "${session.title || session.id}"?`)) {
+                          removeSession(session.id);
+                        }
+                      }}
+                      title="Delete session"
+                      className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-[var(--text-3)] hover:text-[var(--red)] hover:bg-[var(--veil)] transition-all"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </>
                 )}
               </div>
             ))}
           </div>
 
-          {/* Footer: unified "New" button opens SessionTypeModal */}
+          {/* Footer: "New Session" button */}
           <div className="p-2 border-t border-[var(--border)]">
             <button
               onClick={openCreateSessionModal}
@@ -90,7 +157,7 @@ export function Sidebar() {
               }`}
               title="New session (Remote or Local)"
             >
-              {sidebarCollapsed ? '+' : '+ New'}
+              {sidebarCollapsed ? '+' : '+ New Session'}
             </button>
           </div>
         </>

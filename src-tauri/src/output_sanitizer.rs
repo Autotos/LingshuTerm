@@ -72,6 +72,17 @@ fn re_standalone_dollar_question() -> &'static Regex {
     })
 }
 
+/// 以 `PROMPT_COMMAND=` 起头的行 —— block command wrapper echo。
+/// `wrap_command` 注入 `PROMPT_COMMAND= printf ...` 来屏蔽 prompt hook，
+/// 这一整行会在终端回显，需整体裁切。
+fn re_prompt_command_line() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?m)^.*\bPROMPT_COMMAND=[^\n]*\r?\n?")
+            .expect("PROMPT_COMMAND line regex")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -95,6 +106,9 @@ pub fn sanitize_output(raw_output: String) -> String {
     // 1.5) 清理孤立的 `$?` 行（当 `__ls_rc=$?` 被 chunk 边界切分时，
     //      `$?` 单独落在下一块；也处理 PROMPT_COMMAND / xtrace 泄露）。
     let s = re_standalone_dollar_question().replace_all(&s, "").into_owned();
+
+    // 1.6) 清理 block command wrapper 回显行（`PROMPT_COMMAND= printf ...`）。
+    let s = re_prompt_command_line().replace_all(&s, "").into_owned();
 
     // 2) 再剥 OSC 序列（BEL 结尾的复杂结构）。
     let s = re_osc_7701().replace_all(&s, "").into_owned();

@@ -35,13 +35,13 @@ export function useSession(sessionId: string | null): Session | null {
     const latestGroup = groups.find((g) => g.sessionId === sessionId);
     const currentFlow = latestGroup?.query ?? '';
 
-    const terminal = emptyTerminalData(info.shell, info.cwd);
+    const terminal = emptyTerminalData();
     const editor = editorBySession[sessionId] ?? emptyEditorData();
     const blocksData = { ...emptyBlocksData(), tasks, currentFlow };
 
     return {
       id: info.id,
-      name: info.connectionName || info.title || info.id,
+      name: info.title || info.id,
       mode: info.mode ?? 'terminal',
       createdAt: info.createdAt,
       lastAccessed: info.lastAccessed ?? info.createdAt,

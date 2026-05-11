@@ -1,23 +1,25 @@
 /**
  * Session 持久化订阅编排
  *
- * 职责：
- *  1) 监听四个 store 的变更，按 session 分组、debounced 写回磁盘
- *  2) 提供 restoreAll() 启动恢复：list_sessions → 逐个 load_session → hydrate stores
- *  3) 提供 flushAll() 强制立刻落盘（关闭窗口前调用）
+ * 3.0 changes:
+ *  - Adds a 5th subscription for `sessionLogStore`, writing the unified
+ *    SessionEvent timeline to `session.timeline.ndjson`.
+ *  - The existing terminal.ndjson and blocks.json subscriptions are kept
+ *    for backward compatibility and will be removed in a later cleanup phase.
  *
- * 设计要点：
- *  - 持久化失败仅 console.error，不影响 UI
- *  - hydrate 过程用 `paused` 标志抑制反向写回
- *  - 各类数据独立 debounce，避免相互拖累
+ * 职责：
+ *  1) 监听 5 个 store 的变更，debounced 写回磁盘
+ *  2) restoreAll(): 启动恢复 → hydrate stores
+ *  3) flushAll(): 窗口关闭前强制落盘
  */
 import type { CommandBlock } from '@/models/block';
 import type { SessionInfo } from '@/models/session';
-import type { BlocksData, EditorData, SessionMode } from '@/models/sessionData';
+import type { BlocksData, EditorData, SessionMode, SessionEvent } from '@/models/sessionData';
 import type { TaskGroup } from '@/models/task';
 
 import {
   appendTerminalBatch,
+  appendTimelineBatch,
   clearSession as clearSessionCmd,
   listSessions,
   loadSession,
@@ -30,16 +32,16 @@ import {
 
 import { useCommandStore } from '@/stores/commandStore';
 import { useEditorStore } from '@/stores/editorStore';
+import { useSessionLogStore } from '@/stores/sessionLogStore';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useTaskStore } from '@/stores/taskStore';
 
-// -------------------------- 全局状态 --------------------------
+// ─── Global state ─────────────────────────────────────────────
 
 const SAVE_DEBOUNCE_MS = 400;
 const TERM_FLUSH_MS = 200;
 const TERM_FLUSH_BYTES = 16 * 1024;
 
-/** 当正在从磁盘恢复数据时开启，避免订阅回写又把刚 hydrate 的状态覆盖回磁盘 */
 let paused = false;
 
 const metaTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -53,11 +55,18 @@ interface TermBuffer {
 }
 const termBuffers = new Map<string, TermBuffer>();
 
-/** 卸载订阅的 dispose 集合 */
+/** 3.0: Timeline buffer — collects SessionEvent JSON strings for session.timeline.ndjson. */
+interface TimelineBuffer {
+  lines: string[];
+  count: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+const timelineBuffers = new Map<string, TimelineBuffer>();
+
 const disposers: Array<() => void> = [];
 let started = false;
 
-// -------------------------- 工具函数 --------------------------
+// ─── Scheduling helpers ───────────────────────────────────────
 
 function schedule(
   map: Map<string, ReturnType<typeof setTimeout>>,
@@ -72,13 +81,12 @@ function schedule(
     try {
       await fn();
     } catch (e) {
-      console.error(`[persistence] save for ${key} failed:`, e);
+      console.error(`[persistence] save ${key} failed:`, e);
     }
   }, SAVE_DEBOUNCE_MS);
   map.set(key, handle);
 }
 
-/** 立即 flush 所有挂起的写任务，等待它们完成 */
 async function flushTimers(
   map: Map<string, ReturnType<typeof setTimeout>>,
   executors: Map<string, () => Promise<void> | void>,
@@ -92,24 +100,24 @@ async function flushTimers(
   await Promise.allSettled(keys.map((k) => executors.get(k)?.()));
 }
 
-/** 将 SessionInfo 转为磁盘上的 meta payload */
 function toMetaPayload(info: SessionInfo): SessionMetaPayload {
   const now = new Date().toISOString();
   return {
     id: info.id,
-    name: info.connectionName || info.title || info.id,
+    name: info.title || info.id,
     mode: (info.mode as SessionMode) ?? 'terminal',
     createdAt: info.createdAt ?? now,
     lastAccessed: info.lastAccessed ?? now,
-    shell: info.shell,
-    cwd: info.cwd,
     status: info.status,
-    connectionType: info.connectionType,
-    connectionName: info.connectionName,
+    terminals: info.terminals.map((t) => ({
+      id: t.id,
+      title: t.title,
+      connectionId: t.connectionId,
+      config: t.config,
+    })),
   };
 }
 
-/** 聚合 commandStore + taskStore 生成 blocks.json 内容 */
 function buildBlocksData(sessionId: string): BlocksData {
   const blocks = useCommandStore
     .getState()
@@ -125,22 +133,71 @@ function buildBlocksData(sessionId: string): BlocksData {
   };
 }
 
-// -------------------------- 订阅启动 --------------------------
+// ─── Timeline buffer ──────────────────────────────────────────
+
+function flushTimelineBuffer(sessionId: string): void {
+  const buf = timelineBuffers.get(sessionId);
+  if (!buf) return;
+  if (buf.timer) {
+    clearTimeout(buf.timer);
+    buf.timer = null;
+  }
+  if (buf.lines.length === 0) return;
+  const lines = buf.lines;
+  buf.lines = [];
+  buf.count = 0;
+  appendTimelineBatch(sessionId, lines).catch((e) =>
+    console.debug('[persistence] append_timeline_batch failed:', e),
+  );
+}
+
+function persistTimelineEvent(sessionId: string, eventJson: string): void {
+  if (paused || !sessionId || !eventJson) return;
+  let buf = timelineBuffers.get(sessionId);
+  if (!buf) {
+    buf = { lines: [], count: 0, timer: null };
+    timelineBuffers.set(sessionId, buf);
+  }
+  buf.lines.push(eventJson);
+  buf.count++;
+
+  if (buf.count >= 64) {
+    flushTimelineBuffer(sessionId);
+    return;
+  }
+  if (!buf.timer) {
+    buf.timer = setTimeout(() => {
+      flushTimelineBuffer(sessionId);
+    }, SAVE_DEBOUNCE_MS);
+  }
+}
+
+// ─── SessionEvent → JSON ──────────────────────────────────────
+
+function serializeSessionEvent(ev: SessionEvent): string {
+  return JSON.stringify({
+    id: ev.id,
+    sessionId: ev.sessionId,
+    type: ev.type,
+    data: ev.data,
+    ts: ev.ts,
+  });
+}
+
+// ─── Subscription management ──────────────────────────────────
 
 export function startPersistenceSubscriptions() {
   if (started) return;
   started = true;
 
-  // -- 1) sessionStore：每个 session 的 meta ----
+  // -- 1) sessionStore → meta.json --
   const unsubSession = useSessionStore.subscribe((state, prev) => {
     if (state.sessions === prev.sessions) return;
-    // 找到新增 / 变化的 session
     for (const [id, session] of state.sessions) {
       if (prev.sessions.get(id) !== session) {
         schedule(metaTimers, id, () => saveSessionMeta(id, toMetaPayload(session)));
       }
     }
-    // 找到被移除的 session → 清理磁盘，同时取消所有 pending timers / buffer
     for (const [id] of prev.sessions) {
       if (!state.sessions.has(id)) {
         cancelPendingFor(id);
@@ -152,7 +209,7 @@ export function startPersistenceSubscriptions() {
   });
   disposers.push(unsubSession);
 
-  // -- 2) commandStore：blocks 变更时按 sessionId 重写 blocks.json ----
+  // -- 2) commandStore → blocks.json (2.0 compat) --
   const unsubCommand = useCommandStore.subscribe((state, prev) => {
     if (state.blocks === prev.blocks) return;
     const changed = diffSessionIds(prev.blocks, state.blocks, (b) => b.sessionId, (b) => b.id);
@@ -162,7 +219,7 @@ export function startPersistenceSubscriptions() {
   });
   disposers.push(unsubCommand);
 
-  // -- 3) taskStore：groups 变更时同步写 blocks.json（合并存储）----
+  // -- 3) taskStore → blocks.json (2.0 compat) --
   const unsubTask = useTaskStore.subscribe((state, prev) => {
     if (state.groups === prev.groups) return;
     const changed = diffSessionIds(prev.groups, state.groups, (g) => g.sessionId, (g) => g.id);
@@ -172,7 +229,7 @@ export function startPersistenceSubscriptions() {
   });
   disposers.push(unsubTask);
 
-  // -- 4) editorStore：bySession 变更时按 sessionId 重写 editor.json ----
+  // -- 4) editorStore → editor.json --
   const unsubEditor = useEditorStore.subscribe((state, prev) => {
     if (state.bySession === prev.bySession) return;
     const keys = new Set<string>([
@@ -189,21 +246,40 @@ export function startPersistenceSubscriptions() {
     }
   });
   disposers.push(unsubEditor);
+
+  // -- 5) sessionLogStore → session.timeline.ndjson (3.0) --
+  const unsubLog = useSessionLogStore.subscribe((state, prev) => {
+    if (state.logs === prev.logs) return;
+    // Diff: find which sessions have new events appended
+    const allKeys = new Set([
+      ...Object.keys(state.logs),
+      ...Object.keys(prev.logs),
+    ]);
+    for (const sid of allKeys) {
+      const cur = state.logs[sid] ?? [];
+      const old = prev.logs[sid] ?? [];
+      if (cur.length > old.length) {
+        // Append only new events
+        const newEvents = cur.slice(old.length);
+        for (const ev of newEvents) {
+          persistTimelineEvent(sid, serializeSessionEvent(ev));
+        }
+      }
+    }
+  });
+  disposers.push(unsubLog);
 }
 
 export function stopPersistenceSubscriptions() {
   for (const d of disposers) {
-    try {
-      d();
-    } catch {
-      /* ignore */
-    }
+    try { d(); } catch { /* ignore */ }
   }
   disposers.length = 0;
   started = false;
 }
 
-// 找出 prev / next 中哪些 sessionId 发生了增量变化
+// ─── Diff helpers ─────────────────────────────────────────────
+
 function diffSessionIds<T>(
   prev: T[],
   next: T[],
@@ -222,12 +298,8 @@ function diffSessionIds<T>(
   return changed;
 }
 
-// -------------------------- 启动恢复 --------------------------
+// ─── Restore ──────────────────────────────────────────────────
 
-/**
- * 读取磁盘上全部 session，依次 hydrate 到各 store。
- * 恢复过程中 paused=true，避免订阅回写。
- */
 export async function restoreAllSessions(options?: { terminalTailLimit?: number }) {
   paused = true;
   try {
@@ -250,33 +322,37 @@ export async function restoreAllSessions(options?: { terminalTailLimit?: number 
       const info: SessionInfo = {
         id: m.id,
         status: (m.status as SessionInfo['status']) ?? 'disconnected',
-        shell: m.shell ?? 'default',
-        cwd: m.cwd ?? '~',
         title: m.name ?? m.id,
-        createdAt: m.createdAt,
+        createdAt: m.createdAt ?? new Date().toISOString(),
         mode: m.mode,
         lastAccessed: m.lastAccessed,
-        connectionType: m.connectionType,
-        connectionName: m.connectionName,
+        terminals: (m as any).terminals ?? [],
+        activeTerminalIndex: -1,
       };
       sessionInfos.push(info);
 
-      // blocks.json：拆分 commandBlocks 和 taskGroups
+      // 2.0 compat: blocks.json → commandStore + taskStore
       if (snap.blocks) {
         const bd = snap.blocks;
-        const cmdBlocks = (bd.tasks ?? []) as CommandBlock[];
-        useCommandStore.getState().setSessionBlocks(m.id, cmdBlocks);
-        const tg = (bd.taskGroups ?? []) as TaskGroup[];
-        useTaskStore.getState().setSessionGroups(m.id, tg);
+        useCommandStore.getState().setSessionBlocks(m.id, bd.tasks as CommandBlock[]);
+        useTaskStore.getState().setSessionGroups(m.id, (bd.taskGroups ?? []) as TaskGroup[]);
       }
 
       // editor.json
       if (snap.editor) {
         useEditorStore.getState().hydrate(m.id, snap.editor as EditorData);
       }
+
+      // 3.0: restore timeline from session.timeline.ndjson tail
+      const timelineLines = snap.timeline_tail ?? snap.terminal_tail ?? [];
+      if (timelineLines.length > 0) {
+        const events = parseTimelineLines(timelineLines, m.id);
+        if (events.length > 0) {
+          useSessionLogStore.getState().hydrate(m.id, events);
+        }
+      }
     }
 
-    // 选最近访问的作为 active
     sessionInfos.sort((a, b) =>
       (b.lastAccessed ?? '').localeCompare(a.lastAccessed ?? ''),
     );
@@ -289,10 +365,34 @@ export async function restoreAllSessions(options?: { terminalTailLimit?: number 
   }
 }
 
-// -------------------------- Flush（窗口关闭前） --------------------------
+// ─── Parse timeline NDJSON ────────────────────────────────────
+
+function parseTimelineLines(lines: string[], sessionId: string): SessionEvent[] {
+  const events: SessionEvent[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed);
+      if (obj && typeof obj.type === 'string' && obj.sessionId === sessionId) {
+        events.push({
+          id: obj.id ?? `evt-${obj.ts ?? Date.now()}`,
+          sessionId: obj.sessionId,
+          type: obj.type,
+          data: obj.data,
+          ts: obj.ts ?? Date.now(),
+        });
+      }
+    } catch {
+      // skip corrupted lines
+    }
+  }
+  return events;
+}
+
+// ─── Flush ────────────────────────────────────────────────────
 
 export async function flushAll() {
-  // 构建 executor：读取最新 state 直接写
   const metaExecutors = new Map<string, () => Promise<void>>();
   for (const id of metaTimers.keys()) {
     const session = useSessionStore.getState().sessions.get(id);
@@ -310,18 +410,30 @@ export async function flushAll() {
     if (data) editorExecutors.set(id, () => saveSessionEditor(id, data));
   }
 
+  // 3.0: Flush all timeline buffers
+  const timelineFlushes = Array.from(timelineBuffers.keys()).map((sid) => {
+    const buf = timelineBuffers.get(sid);
+    if (!buf) return Promise.resolve();
+    if (buf.timer) clearTimeout(buf.timer);
+    buf.timer = null;
+    if (buf.lines.length === 0) return Promise.resolve();
+    const lines = [...buf.lines];
+    buf.lines = [];
+    buf.count = 0;
+    return appendTimelineBatch(sid, lines);
+  });
+
   await Promise.allSettled([
     flushTimers(metaTimers, metaExecutors),
     flushTimers(blocksTimers, blocksExecutors),
     flushTimers(editorTimers, editorExecutors),
-    // 终端缓冲区也一并落盘
     ...Array.from(termBuffers.keys()).map((sid) => flushTerminalBuffer(sid)),
+    ...timelineFlushes,
   ]);
 }
 
-// -------------------------- Terminal 日志透传 --------------------------
+// ─── Terminal chunk (kept for backward compat) ────────────────
 
-/** 供 useTerminal 直接调用，内部失败吞掉 */
 export function persistTerminalChunk(
   sessionId: string,
   stream: 'stdout' | 'stderr' | 'input' | 'system',
@@ -336,12 +448,10 @@ export function persistTerminalChunk(
   buf.entries.push({ ts: Date.now(), stream, data });
   buf.byteCount += data.length;
 
-  // 达到容量阈值立刻 flush
   if (buf.byteCount >= TERM_FLUSH_BYTES) {
     void flushTerminalBuffer(sessionId);
     return;
   }
-  // 否则起定时器，时间窗口合并
   if (!buf.timer) {
     buf.timer = setTimeout(() => {
       void flushTerminalBuffer(sessionId);
@@ -367,7 +477,6 @@ async function flushTerminalBuffer(sessionId: string) {
   }
 }
 
-/** 取消某 session 的所有 pending 定时器（删除 session 前调用） */
 function cancelPendingFor(sessionId: string) {
   for (const map of [metaTimers, blocksTimers, editorTimers]) {
     const h = map.get(sessionId);
@@ -376,9 +485,14 @@ function cancelPendingFor(sessionId: string) {
       map.delete(sessionId);
     }
   }
-  const buf = termBuffers.get(sessionId);
-  if (buf) {
-    if (buf.timer) clearTimeout(buf.timer);
+  const termBuf = termBuffers.get(sessionId);
+  if (termBuf) {
+    if (termBuf.timer) clearTimeout(termBuf.timer);
     termBuffers.delete(sessionId);
+  }
+  const tlBuf = timelineBuffers.get(sessionId);
+  if (tlBuf) {
+    if (tlBuf.timer) clearTimeout(tlBuf.timer);
+    timelineBuffers.delete(sessionId);
   }
 }

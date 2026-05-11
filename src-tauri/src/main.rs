@@ -48,9 +48,13 @@ fn main() {
             persistence::save_session_editor,
             persistence::append_terminal_log,
             persistence::append_terminal_batch,
+            persistence::append_timeline_batch,
             persistence::load_session,
             persistence::list_sessions,
             persistence::clear_session,
+            persistence::save_session_export,
+            persistence::load_sessions,
+            persistence::save_sessions,
             // Connection storage (encrypted)
             storage::load_connections,
             storage::save_connections,
