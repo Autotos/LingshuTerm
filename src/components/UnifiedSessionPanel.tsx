@@ -1,5 +1,8 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { useSessionStream } from '@/hooks/useSessionStream';
+import { useSessionStore } from '@/stores/sessionStore';
+import { useSettingsStore } from '@/stores/settingsStore';
+import { LoggerService } from '@/lib/loggerService';
 import { TerminalRenderer } from './TerminalRenderer';
 import type { TerminalRendererHandle } from './TerminalRenderer';
 
@@ -35,7 +38,14 @@ export function UnifiedSessionPanel({
 
   const handleTerminalOutput = useCallback((data: string) => {
     terminalRef.current?.write(data);
-  }, []);
+    if (sessionId && data) {
+      const meta = useSessionStore.getState().resolveTerminalMeta(sessionId);
+      if (meta?.isLogging) {
+        const { logging } = useSettingsStore.getState().settings;
+        LoggerService.write(logging, meta.sessionName, meta.terminalName, data);
+      }
+    }
+  }, [sessionId]);
 
   const handleCommandStart = useCallback((command: string) => {
     writeCommandHeader(terminalRef.current, command);

@@ -1,11 +1,11 @@
 import { useState, useCallback } from 'react';
-import { X, Zap, Terminal, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { X, Zap, Terminal, Loader2, CheckCircle2, XCircle, ScrollText } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useUiStore } from '@/stores/uiStore';
 import { AI_PRESETS, testConnection } from '@/lib/aiService';
 import type { AiConfig } from '@/lib/aiService';
 
-type SettingsTab = 'ai' | 'terminal';
+type SettingsTab = 'ai' | 'terminal' | 'logging';
 
 export function SettingsModal() {
   const { settingsOpen, setSettingsOpen } = useUiStore();
@@ -38,18 +38,24 @@ export function SettingsModal() {
         <div className="flex gap-1 px-5 pt-3">
           <TabBtn icon={<Zap className="w-3.5 h-3.5" />} label="AI" active={tab === 'ai'} onClick={() => setTab('ai')} />
           <TabBtn icon={<Terminal className="w-3.5 h-3.5" />} label="Terminal" active={tab === 'terminal'} onClick={() => setTab('terminal')} />
+          <TabBtn icon={<ScrollText className="w-3.5 h-3.5" />} label="Logging" active={tab === 'logging'} onClick={() => setTab('logging')} />
         </div>
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {tab === 'ai' ? (
             <AiSettings config={settings.ai} onUpdate={updateAiSettings} />
-          ) : (
+          ) : tab === 'terminal' ? (
             <TerminalSettings
               terminal={settings.terminal}
               shell={settings.shell}
               onUpdateTerminal={(patch) => updateSettings({ terminal: { ...settings.terminal, ...patch } })}
               onUpdateShell={(patch) => updateSettings({ shell: { ...settings.shell, ...patch } })}
+            />
+          ) : (
+            <LoggingSettings
+              logging={settings.logging}
+              onUpdate={(patch) => updateSettings({ logging: { ...settings.logging, ...patch } })}
             />
           )}
         </div>
@@ -255,6 +261,55 @@ function TerminalSettings({
           />
         </Field>
       </div>
+    </>
+  );
+}
+
+// ---- Logging Settings ----
+
+function LoggingSettings({
+  logging,
+  onUpdate,
+}: {
+  logging: { enabled: boolean; logPath: string; maxSizeMb: number };
+  onUpdate: (patch: Partial<{ enabled: boolean; logPath: string; maxSizeMb: number }>) => void;
+}) {
+  return (
+    <>
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={logging.enabled}
+          onChange={(e) => onUpdate({ enabled: e.target.checked })}
+          className="w-3.5 h-3.5 rounded border-[var(--border)] bg-[var(--void)] accent-[var(--accent)]"
+        />
+        <span className="text-[12px] text-[var(--text-2)]">Enable Logging</span>
+      </label>
+
+      <Field label="Log Path">
+        <input
+          type="text"
+          className="settings-input"
+          value={logging.logPath}
+          onChange={(e) => onUpdate({ logPath: e.target.value })}
+          placeholder="default: {workspace}/logs"
+        />
+      </Field>
+
+      <Field label="Max Size (MB)">
+        <input
+          type="number"
+          className="settings-input"
+          value={logging.maxSizeMb}
+          onChange={(e) => onUpdate({ maxSizeMb: Math.max(1, parseInt(e.target.value, 10) || 10) })}
+          min={1}
+        />
+      </Field>
+
+      <p className="text-[10px] text-[var(--text-4)]">
+        Log files are written to {'{logPath}/{sessionName}/{terminalName}.log'}. Files
+        exceeding the max size are automatically rotated with a timestamp suffix.
+      </p>
     </>
   );
 }

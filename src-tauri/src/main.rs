@@ -5,6 +5,7 @@ use lingshu_term2_lib::{
     commands,
     connection::ConnectionManager,
     connection_commands,
+    logger,
     persistence,
     session_commands,
     shell::PtyManager,
@@ -55,6 +56,11 @@ fn main() {
             persistence::save_session_export,
             persistence::load_sessions,
             persistence::save_sessions,
+            // Logger
+            logger::write_log,
+            logger::list_logs,
+            logger::read_log_file,
+            logger::open_in_explorer,
             // Connection storage (encrypted)
             storage::load_connections,
             storage::save_connections,

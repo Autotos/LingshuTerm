@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { TitleBar } from './TitleBar';
 import { Sidebar } from './Sidebar';
 import { EditorPanel } from './EditorPanel';
@@ -9,6 +9,7 @@ import { SettingsModal } from './SettingsModal';
 import { SessionTypeModal } from './SessionTypeModal';
 import { TerminalConnectModal } from './TerminalConnectModal';
 import { SessionManager } from './SessionManager';
+import { LogViewer } from './LogViewer';
 import { StatusBar } from './StatusBar';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
@@ -24,6 +25,7 @@ export function Layout() {
   const addSession = useSessionStore((s) => s.addSession);
   const restoreTerminals = useSessionStore((s) => s.restoreTerminals);
   const { isEditorVisible, toggleEditor } = useUiStore();
+  const [logsOpen, setLogsOpen] = useState(false);
 
   // Reactive selector: re-renders when activeTerminalIndex or terminals change
   const activeConnectionId = useSessionStore((s) => {
@@ -79,6 +81,7 @@ export function Layout() {
         sessionName={sessionLabel}
         isEditorVisible={isEditorVisible}
         onToggleEditor={toggleEditor}
+        onToggleLogs={() => setLogsOpen((v) => !v)}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -154,6 +157,7 @@ export function Layout() {
       <SessionTypeModal />
       <TerminalConnectModal />
       <SessionManager />
+      <LogViewer isOpen={logsOpen} onClose={() => setLogsOpen(false)} />
     </div>
   );
 }

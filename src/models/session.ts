@@ -10,6 +10,8 @@ export interface TerminalInstance {
   connectionId: string;
   /** The connection config used to create this terminal (for persistence/reconnect). */
   config: ConnectionConfig;
+  /** Whether per-terminal logging is enabled for this tab. */
+  isLogging: boolean;
 }
 
 export interface SessionInfo {

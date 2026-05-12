@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Minus, Square, X, Settings, FolderTree, Code2 } from 'lucide-react';
+import { Settings, FolderTree, Code2, ScrollText } from 'lucide-react';
 import { useUiStore } from '@/stores/uiStore';
 
 const appWindow = getCurrentWindow();
@@ -8,9 +8,10 @@ interface TitleBarProps {
   sessionName: string;
   isEditorVisible: boolean;
   onToggleEditor: () => void;
+  onToggleLogs: () => void;
 }
 
-export function TitleBar({ sessionName, isEditorVisible, onToggleEditor }: TitleBarProps) {
+export function TitleBar({ sessionName, isEditorVisible, onToggleEditor, onToggleLogs }: TitleBarProps) {
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const toggleSessionManager = useUiStore((s) => s.toggleSessionManager);
   return (
@@ -53,6 +54,13 @@ export function TitleBar({ sessionName, isEditorVisible, onToggleEditor }: Title
           <Code2 className="w-[14px] h-[14px]" />
         </button>
         <button
+          onClick={onToggleLogs}
+          title="Logs"
+          className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
+        >
+          <ScrollText className="w-[14px] h-[14px]" />
+        </button>
+        <button
           onClick={toggleSessionManager}
           className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
           title="Session Manager"
@@ -65,27 +73,6 @@ export function TitleBar({ sessionName, isEditorVisible, onToggleEditor }: Title
           title="Settings"
         >
           <Settings className="w-[14px] h-[14px]" />
-        </button>
-        <button
-          onClick={() => appWindow.minimize()}
-          className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
-          title="Minimize"
-        >
-          <Minus className="w-[14px] h-[14px]" />
-        </button>
-        <button
-          onClick={() => appWindow.toggleMaximize()}
-          className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
-          title="Maximize"
-        >
-          <Square className="w-[12px] h-[12px]" />
-        </button>
-        <button
-          onClick={() => appWindow.close()}
-          className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--red)]/20 hover:border-[var(--border)] transition-all"
-          title="Close"
-        >
-          <X className="w-[14px] h-[14px]" />
         </button>
       </div>
     </div>

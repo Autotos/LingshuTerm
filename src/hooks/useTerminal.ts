@@ -230,7 +230,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
         inputBufferRef.current.push(data);
         return;
       }
-      // Flush any remaining buffer first (belt-and-suspenders)
       if (inputBufferRef.current.length > 0) {
         flushInputBuffer();
       }

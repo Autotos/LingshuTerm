@@ -3,6 +3,7 @@ pub mod commands;
 pub mod connection;
 pub mod connection_commands;
 pub mod executor;
+pub mod logger;
 pub mod output_sanitizer;
 pub mod persistence;
 pub mod session_commands;

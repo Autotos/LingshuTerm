@@ -11,6 +11,11 @@ interface AppSettings {
     scrollback: number;
   };
   ai: AiConfig;
+  logging: {
+    enabled: boolean;
+    logPath: string;
+    maxSizeMb: number;
+  };
 }
 
 interface SettingsState {
@@ -27,6 +32,11 @@ const defaultSettings: AppSettings = {
     scrollback: 10000,
   },
   ai: defaultAiConfig,
+  logging: {
+    enabled: true,
+    logPath: '',
+    maxSizeMb: 10,
+  },
 };
 
 export const useSettingsStore = create<SettingsState>()(

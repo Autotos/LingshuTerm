@@ -1,4 +1,4 @@
-import { X, Plus } from 'lucide-react';
+import { X, Plus, Circle } from 'lucide-react';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
 import type { TerminalInstance } from '@/models/session';
@@ -9,12 +9,13 @@ interface TerminalTabBarProps {
 
 /**
  * Horizontal tab bar displaying terminals for the active session.
- * Always visible when a session is active — shows a + button even with no tabs.
+ * Each tab has a logging toggle dot (green=pulsing when recording, gray=stopped).
  */
 export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
   const sessions = useSessionStore((s) => s.sessions);
   const setActiveTerminalIndex = useSessionStore((s) => s.setActiveTerminalIndex);
   const removeTerminal = useSessionStore((s) => s.removeTerminal);
+  const toggleTerminalLogging = useSessionStore((s) => s.toggleTerminalLogging);
   const openTerminalModal = useUiStore((s) => s.openTerminalModal);
 
   const session = sessionId ? sessions.get(sessionId) : undefined;
@@ -46,6 +47,24 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
                 : 'text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)]'
             }`}
           >
+            {/* Logging toggle dot */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleTerminalLogging(sessionId, term.id);
+              }}
+              title={term.isLogging ? 'Stop logging' : 'Start logging'}
+              className="flex-shrink-0"
+            >
+              <Circle
+                className={`w-2 h-2 ${
+                  term.isLogging
+                    ? 'text-[var(--green)] animate-pulse fill-current'
+                    : 'text-[var(--text-4)]'
+                }`}
+              />
+            </button>
+
             <span className="truncate max-w-[160px]">{term.title}</span>
             <button
               onClick={(e) => {
@@ -61,7 +80,6 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
         );
       })}
 
-      {/* Add terminal button — always visible */}
       <button
         onClick={handleAdd}
         className="h-full px-2 flex items-center text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] transition-colors flex-shrink-0"
@@ -70,7 +88,6 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
         <Plus className="w-3 h-3" />
       </button>
 
-      {/* Empty state hint */}
       {terminals.length === 0 && (
         <span className="text-[10px] text-[var(--text-4)] px-2">
           Click + to add a terminal

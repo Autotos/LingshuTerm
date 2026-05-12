@@ -25,6 +25,16 @@ interface SessionState {
   /** Switch the active terminal tab within a session. */
   setActiveTerminalIndex: (sessionId: string, index: number) => void;
 
+  /** Toggle per-terminal logging for a tab. */
+  toggleTerminalLogging: (sessionId: string, terminalId: string) => void;
+
+  /** Resolve session/terminal metadata for a connectionId (used by logger). */
+  resolveTerminalMeta: (connectionId: string) => {
+    sessionName: string;
+    terminalName: string;
+    isLogging: boolean;
+  } | null;
+
   /** Get the active terminal's backend connectionId, or null. */
   getActiveConnectionId: (sessionId: string) => string | null;
 
@@ -122,6 +132,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       title: title ?? `Terminal ${connectionId}`,
       connectionId,
       config,
+      isLogging: false,
     };
     set((state) => {
       const session = state.sessions.get(sessionId);
@@ -171,6 +182,34 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       next.set(sessionId, { ...session, activeTerminalIndex: index });
       return { sessions: next };
     }),
+
+  toggleTerminalLogging: (sessionId, terminalId) =>
+    set((state) => {
+      const session = state.sessions.get(sessionId);
+      if (!session) return state;
+      const next = new Map(state.sessions);
+      next.set(sessionId, {
+        ...session,
+        terminals: session.terminals.map((t) =>
+          t.id === terminalId ? { ...t, isLogging: !t.isLogging } : t,
+        ),
+      });
+      return { sessions: next };
+    }),
+
+  resolveTerminalMeta: (connectionId) => {
+    for (const [, s] of get().sessions) {
+      const term = s.terminals.find((t) => t.connectionId === connectionId);
+      if (term) {
+        return {
+          sessionName: s.title || s.id,
+          terminalName: term.title,
+          isLogging: term.isLogging,
+        };
+      }
+    }
+    return null;
+  },
 
   getActiveConnectionId: (sessionId) => {
     const session = get().sessions.get(sessionId);
