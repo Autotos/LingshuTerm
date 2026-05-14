@@ -138,7 +138,7 @@ fn decrypt_ciphertext(encoded: &str) -> Result<String, String> {
 
 // ─── 加密/解密 ConnectionConfig 的 password 字段 ─────────────
 
-fn encrypt_config(mut config: Value) -> Result<Value, String> {
+pub fn encrypt_config(mut config: Value) -> Result<Value, String> {
     if let Value::Object(ref mut obj) = config {
         if let Some(pw) = obj.get("password").and_then(|v| v.as_str()) {
             if !pw.is_empty() {
@@ -150,11 +150,10 @@ fn encrypt_config(mut config: Value) -> Result<Value, String> {
     Ok(config)
 }
 
-fn decrypt_config(mut config: Value) -> Result<Value, String> {
+pub fn decrypt_config(mut config: Value) -> Result<Value, String> {
     if let Value::Object(ref mut obj) = config {
         if let Some(pw) = obj.get("password").and_then(|v| v.as_str()) {
             if !pw.is_empty() {
-                // 尝试解密；如果看起来像明文（短密码）则保留原样
                 match decrypt_ciphertext(pw) {
                     Ok(plain) => {
                         obj.insert("password".to_string(), Value::String(plain));

@@ -19,6 +19,8 @@
 - **本地 PTY**：基于 `portable-pty` 的跨平台伪终端
 - **代码编辑器**：集成 Monaco Editor，支持多 Tab 虚拟工作区
 - **会话管理器**：树形目录分组、HTML5 拖拽排序、右键菜单、加密持久化
+- **终端日志审计**：实时记录终端输入输出、自动轮转（10MB）、文件树查看器
+- **集成服务器管理**：一键启停 TFTP/FTP/HTTP/SSH 等网络服务、端口检测、进程守护
 
 ### 1.2 技术栈清单
 
@@ -78,6 +80,7 @@ LingshuTerm3.0/
 │   │   ├── task.ts             # AI 任务模型（nlToTasks → TaskGroup → TaskItem）
 │   │   ├── editor.ts           # 编辑器模型
 │   │   ├── agent.ts            # ★新增: AI Agent 消息、授权、任务模型
+│   │   ├── logger.ts            # ★新增: 日志服务模型
 │   │   └── __tests__/
 │   │
 │   ├── stores/                 # 状态管理层 — Zustand Store（8 个）
@@ -110,7 +113,8 @@ LingshuTerm3.0/
 │   │   ├── aiService.ts        # OpenAI 兼容 API 客户端（nlToTasks / testConnection）
 │   │   ├── aiDetect.ts         # 输入检测（自然语言 vs Shell 命令）
 │   │   ├── persistenceSubscribe.ts # 四路 Store 订阅 → Rust 持久化（★重构适配 sessionLogStore）
-│   │   ├── persistenceService.ts   # 持久化薄封装（load/save/append）
+│   │   ├── persistenceService.ts   # 持久化薄封装（load/save/append/session export）
+│   │   ├── loggerService.ts        # ★新增: 日志服务（write/list/read/openInExplorer）
 │   │   ├── monaco.ts           # Monaco Editor 工厂函数
 │   │   ├── ansi.ts             # ANSI 转义序列解析（stripControl / parseAnsiToSegments）
 │   │   ├── xterm.ts            # xterm.js 主题配置（独立工厂函数）
@@ -122,20 +126,19 @@ LingshuTerm3.0/
 │   │   ├── Layout.tsx          # 主布局（集成 FloatingPet 和 AgentPanel）
 │   │   ├── TitleBar.tsx        # 标题栏
 │   │   ├── Sidebar.tsx         # 侧边栏（会话列表 + 任务列表）
-│   │   ├── UnifiedSessionPanel.tsx # ★核心重构: 统一终端面板，内含 ViewSwitcher
+│   │   ├── UnifiedSessionPanel.tsx # ★核心: 统一终端面板（Chunked Stream）
 │   │   │   ├── TerminalRenderer.tsx # 终端渲染器（xterm.js）
-│   │   │   ├── BlocksRenderer.tsx   # Blocks 渲染器（React，从 sessionLogStore 派生）
-│   │   │   └── SplitRenderer.tsx    # 分栏渲染器（未来）
+│   │   ├── TerminalTabBar.tsx  # ★终端 Tab 栏（含日志录制开关）
+│   │   ├── TerminalConnectModal.tsx # ★新建终端连接配置弹窗
 │   │   ├── EditorPanel.tsx     # 编辑器面板
+│   │   ├── LogViewer.tsx       # ★新增: 日志文件查看器
 │   │   ├── CommandInput.tsx    # 底部命令输入栏（内联 AI 检测 + 历史记录 + Ctrl+C）
 │   │   ├── BottomInputArea.tsx # 底部输入区路由
-│   │   ├── CommandBlock.tsx    # 单个命令块组件（BlocksRenderer 内部使用）
 │   │   ├── TaskBoard.tsx       # AI 任务看板
 │   │   ├── StatusBar.tsx       # 状态栏
-│   │   ├── SettingsModal.tsx   # 设置面板（终端/AI/Shell 配置）
-│   │   ├── SessionTypeModal.tsx# 新建会话模态框（SSH/Telnet/Serial/Local）
-│   │   ├── SessionManager.tsx  # 会话管理器（树形目录/拖拽/右键菜单）
-│   │   ├── ConnectionForm.tsx  # 连接表单
+│   │   ├── SettingsModal.tsx   # 设置面板（终端/AI/Shell/日志 配置）
+│   │   ├── SessionTypeModal.tsx# 新建会话模态框（仅名称）
+│   │   ├── SessionManager.tsx  # 会话管理器（session.json 树形结构）
 │   │   ├── ContextMenu.tsx     # 通用右键菜单组件
 │   │   ├── FloatingPet.tsx     # ★新增: AI Agent 悬浮宠物
 │   │   ├── AgentPanel.tsx      # ★新增: AI Agent 对话面板
@@ -186,7 +189,8 @@ LingshuTerm3.0/
         │
         ├── executor.rs         # 抽象执行器 trait（ShellExecutor / ConnectionExecutor）
         ├── storage.rs          # 加密存储（AES-256-GCM 密码加密 + StoragePayload）
-        ├── persistence.rs      # ★重构: 仅持久化 session.timeline.ndjson + meta.json
+        ├── logger.rs           # ★新增: 日志写入/轮转/ANSI清洗/文件系统浏览器
+        ├── persistence.rs      # ★重构: 统一 session.json 读写、迁移、密码加密
         ├── utils.rs            # 工具函数（workspace_dir / shell 检测）
         │
         ├── agent/              # ★新增: AI Agent 核心模块
@@ -220,8 +224,12 @@ LingshuTerm3.0/
 │                 │                │                │                          │
 │ sessions:Map    │ activeView     │ settings:      │ savedConnections[]       │
 │ activeSession   │ sidebarTab     │   shell        │ groups[]                 │
-│                 │ sessionModal   │   terminal     │ → buildTree()            │
-│                 │                │   ai           │ → TreeNode[]             │
+│ terminals[]     │ sessionModal   │   terminal     │ → buildTree()            │
+│ isLogging:bool  │ terminalModal  │   ai           │ → TreeNode[]             │
+│                 │                │   logging:     │                          │
+│                 │                │     enabled    │                          │
+│                 │                │     logPath    │                          │
+│                 │                │     maxSizeMb  │                          │
 ├─────────────────┼────────────────┼────────────────┼──────────────────────────┤
 │ sessionLogStore │ taskStore      │ agentStore     │ commandStore (deprecated)│
 │ ★核心新增        │ (AI 任务)      │ ★新增          │ 保留兼容旧 Blocks 逻辑    │
@@ -574,6 +582,209 @@ xterm.js 主题与 Monaco Editor 主题均与 CSS 变量保持色彩一致。
 9. Markdown 特征 → `MarkdownRenderer`
 10. 含 Mermaid 代码 → `MermaidDiagram`
 11. 其他 → `AnsiText` (原生 ANSI SGR 渲染)
+
+### 4.9 终端日志审计系统 (Terminal Logging & Auditing)
+
+#### 4.9.1 功能概述
+
+实时记录终端（xterm.js）的输入输出到本地文件系统，支持日志轮转、UI 查看器和配置管理。
+
+- **实时记录**：拦截 xterm.js 的输出流，将清洗后的文本写入日志文件
+- **自动轮转**：当文件超过 `maxSizeMB`（默认 10MB），自动重命名为 `name_YYYYMMDD_HHmmss.log` 并创建新文件
+- **Tab 级控制**：每个 Terminal Tab 有独立的"录制"开关（绿色脉冲圆点表示记录中，灰色表示停止）
+- **UI 查看器**：右侧滑出面板展示日志文件树，支持双击打开查看内容、右键打开目录或复制路径
+
+#### 4.9.2 数据流架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     数据采集层                                   │
+│  xterm.js onData (输入)  →  [暂不记录]                          │
+│  UnifiedSessionPanel  ←  useSessionStream ← session-event       │
+│       ↓                                                         │
+│  handleTerminalOutput(data)                                      │
+│       ↓                                                         │
+│  检查 per-terminal isLogging 标志                                │
+│       ↓                                                         │
+├─────────────────────────────────────────────────────────────────┤
+│                     处理层 (LoggerService)                       │
+│                                                                  │
+│  LoggerService.write(config, sessionName, terminalName, data)    │
+│       ↓                                                         │
+│  invoke('write_log', { logPath, sessionName, terminalName,       │
+│                        data, maxSizeMb })                        │
+│       ↓                                                         │
+├─────────────────────────────────────────────────────────────────┤
+│                     存储层 (Rust backend)                        │
+│                                                                  │
+│  write_log:                                                      │
+│    → strip_ansi() 清除 ESC 序列                                  │
+│    → 换行标准化 (\r\n → \n)                                      │
+│    → 写入 {logPath}/{sessionName}/{terminalName}.log             │
+│    → 检查大小 → 触发轮转                                         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 4.9.3 文件存储结构
+
+```
+{Log Path}/
+├── Default/
+│   ├── Terminal_session-1.log          # 当前日志
+│   ├── Terminal_session-1_20260512_143022.log  # 轮转备份
+│   └── Terminal_session-1_20260512_120000.log
+├── Production_Server/
+│   └── SSH_Connection.log
+└── ...
+```
+
+**路径设计**：终端名称中的非法文件名字符（`:`, `/`, `\`, `*`, `?`, `"`, `<`, `>`, `|`）自动替换为 `_`。
+
+#### 4.9.4 Rust 后端命令
+
+| 命令 | 用途 |
+|------|------|
+| `write_log` | 追加日志条目，自动轮转 |
+| `list_logs` | 列出某会话的所有日志文件 |
+| `read_log_file` | 读取日志文件全文 |
+| `open_in_explorer` | 在系统文件管理器中打开路径 (Windows/macOS/Linux) |
+
+#### 4.9.5 配置项 (Settings Schema)
+
+```typescript
+interface LoggingSettings {
+  enabled: boolean;       // 全局开关（默认 true）
+  logPath: string;        // 日志根路径（空 = {workspace}/logs）
+  maxSizeMb: number;      // 单文件最大大小（默认 10 MB）
+}
+```
+
+配置通过 `useSettingsStore` 持久化到 `localStorage` (`lingshu-settings` key)。
+
+#### 4.9.6 前端组件架构
+
+```
+TitleBar
+  └── ScrollText 按钮 → 切换 LogViewer
+
+TerminalTabBar
+  └── Circle 圆点按钮 (per-tab) → toggleTerminalLogging()
+
+LogViewer (右侧滑出面板, 640px)
+  ├── 左侧: 文件树
+  │   ├── Session 节点 (展开/折叠)
+  │   ├── 当前日志文件 (双击 → 右侧查看)
+  │   ├── 历史轮转文件 (History 分组)
+  │   └── 右键菜单: 打开目录 / 复制路径
+  └── 右侧: 日志内容预览 (<pre> 只读)
+```
+
+#### 4.9.7 状态管理
+
+- **`TerminalInstance.isLogging`** (`boolean`): 每个终端 Tab 的日志开关
+- **`sessionStore.toggleTerminalLogging(sessionId, terminalId)`**: 切换开关
+- **`sessionStore.resolveTerminalMeta(connectionId)`**: 根据连接 ID 查找会话/终端名称和 isLogging 状态
+
+### 4.10 集成服务器管理面板 (Integrated Server Management Panel)
+
+#### 4.10.1 功能概述
+
+在工具栏提供统一的服务管理入口，支持一键启动/停止各种网络服务进程。
+
+- **支持服务列表**：TFTP, FTP, HTTP, SSH/SFTP, Telnet, NFS, VNC, Cron, Iperf
+- **进程管理**：后台 spawn 子进程，维护运行中进程的 PID Map
+- **端口检测**：启动前检查端口是否被占用
+- **状态预览**：右侧面板显示服务运行日志和状态信息
+
+#### 4.10.2 UI 布局设计
+
+```
+┌──────────────────────────────────────────────────────┐
+│  Servers                                    [X]      │
+├──────────────────────┬───────────────────────────────┤
+│  服务列表 (240px)     │  详情预览区                   │
+│                      │                               │
+│  ● TFTP    ▶ ■ ⚙    │  Welcome to LingshuTerm       │
+│  ○ FTP     ▶ ■ ⚙    │  Network Services             │
+│  ○ HTTP    ▶ ■ ⚙    │                               │
+│  ○ SSH     ▶ ■ ⚙    │  Select a service to view     │
+│  ○ Telnet  ▶ ■ ⚙    │  its status and logs.         │
+│  ○ NFS     ▶ ■ ⚙    │                               │
+│  ○ VNC     ▶ ■ ⚙    │                               │
+│  ○ Cron    ▶ ■ ⚙    │                               │
+│  ○ Iperf   ▶ ■ ⚙    │                               │
+│                      │                               │
+└──────────────────────┴───────────────────────────────┘
+```
+
+- **左侧列表**：每行包含状态指示灯 (●/○ 绿/灰)、服务名称、启动/停止按钮 (▶/■)、设置按钮 (⚙)
+- **右侧预览**：显示选中服务的欢迎信息、运行日志或配置面板
+- **入口**：TitleBar 增加 "Servers" 按钮（图标：`Server` 或 `Network`）
+
+#### 4.10.3 核心逻辑架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ServerManager (Rust)                           │
+│                                                                  │
+│  struct ServerManager {                                          │
+│    processes: HashMap<String, Child>,  // 运行中服务 PID Map      │
+│    configs:   HashMap<String, ServerConfig>,                     │
+│  }                                                               │
+│                                                                  │
+│  impl ServerManager {                                            │
+│    fn start(service: &str, config: &ServerConfig) → Result<Pid>  │
+│    fn stop(service: &str) → Result<()>                           │
+│    fn status(service: &str) → ServiceStatus                      │
+│    fn check_port(port: u16) → bool  // 端口占用检测              │
+│    fn list_services() → Vec<ServiceInfo>                         │
+│  }                                                               │
+├─────────────────────────────────────────────────────────────────┤
+│                    Tauri Commands                                 │
+│                                                                  │
+│  start_service(service, config) → Result<String>                 │
+│  stop_service(service) → Result<()>                              │
+│  service_status(service) → ServiceStatus                         │
+│  list_services() → Vec<ServiceInfo>                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 4.10.4 数据结构
+
+```typescript
+interface ServerConfig {
+  serviceName: string;       // 服务标识 (tftp, ftp, http, ...)
+  displayName: string;       // 显示名称
+  port: number;              // 监听端口
+  binaryPath?: string;       // 二进制路径（可选，内置默认）
+  args: string[];            // 启动参数
+  workingDir?: string;       // 工作目录
+  autoStart: boolean;        // 是否随应用启动
+}
+
+interface ServiceStatus {
+  service: string;
+  running: boolean;
+  pid?: number;
+  port?: number;
+  uptime?: number;           // 运行秒数
+  error?: string;
+}
+```
+
+#### 4.10.5 服务配置预设
+
+| 服务 | 默认端口 | 默认二进制 | 说明 |
+|------|---------|-----------|------|
+| TFTP | 69 | 内置 (tftp-server) | 简单文件传输 |
+| FTP | 21 | 内置 (ftp-server) | 文件传输 |
+| HTTP | 80/8080 | 内置 (http-server) | 静态文件服务 |
+| SSH/SFTP | 22 | 内置 (ssh-server) | 安全 Shell |
+| Telnet | 23 | 内置 (telnet-server) | 远程登录 |
+| NFS | 2049 | 内置 (nfs-server) | 网络文件系统 |
+| VNC | 5900 | 内置 (vnc-server) | 远程桌面 |
+| Cron | - | 内置 (cron-daemon) | 定时任务 |
+| Iperf | 5201 | 内置 (iperf3) | 网络性能测试 |
 
 ---
 

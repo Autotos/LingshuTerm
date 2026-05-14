@@ -7,6 +7,7 @@ use lingshu_term2_lib::{
     connection_commands,
     logger,
     persistence,
+    server_manager,
     session_commands,
     shell::PtyManager,
     storage,
@@ -27,8 +28,10 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(PtyManager::new())
         .manage(ConnectionManager::new())
+        .manage(server_manager::ServerManager::new())
         .invoke_handler(tauri::generate_handler![
             // Unified session creation (dispatches to PtyManager or ConnectionManager)
             session_commands::create_session,
@@ -61,6 +64,13 @@ fn main() {
             logger::list_logs,
             logger::read_log_file,
             logger::open_in_explorer,
+            // Server Manager
+            server_manager::list_services,
+            server_manager::service_status,
+            server_manager::start_service,
+            server_manager::stop_service,
+            server_manager::update_service_config,
+            server_manager::get_service_config,
             // Connection storage (encrypted)
             storage::load_connections,
             storage::save_connections,

@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Settings, FolderTree, Code2, ScrollText } from 'lucide-react';
+import { Settings, FolderTree, Code2, ScrollText, Server } from 'lucide-react';
 import { useUiStore } from '@/stores/uiStore';
 
 const appWindow = getCurrentWindow();
@@ -9,9 +9,10 @@ interface TitleBarProps {
   isEditorVisible: boolean;
   onToggleEditor: () => void;
   onToggleLogs: () => void;
+  onToggleServers: () => void;
 }
 
-export function TitleBar({ sessionName, isEditorVisible, onToggleEditor, onToggleLogs }: TitleBarProps) {
+export function TitleBar({ sessionName, isEditorVisible, onToggleEditor, onToggleLogs, onToggleServers }: TitleBarProps) {
   const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
   const toggleSessionManager = useUiStore((s) => s.toggleSessionManager);
   return (
@@ -59,6 +60,13 @@ export function TitleBar({ sessionName, isEditorVisible, onToggleEditor, onToggl
           className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
         >
           <ScrollText className="w-[14px] h-[14px]" />
+        </button>
+        <button
+          onClick={onToggleServers}
+          title="Servers"
+          className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
+        >
+          <Server className="w-[14px] h-[14px]" />
         </button>
         <button
           onClick={toggleSessionManager}

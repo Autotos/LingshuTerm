@@ -365,6 +365,32 @@ pub async fn save_session_export(
     atomic_write_json(&target, &data).await
 }
 
+/// Walk session tree and apply `f` to each terminal's `config` field.
+fn process_terminal_configs(
+    sessions: &mut Value,
+    f: fn(Value) -> Result<Value, String>,
+) -> Result<(), String> {
+    if let Value::Array(ref mut arr) = sessions
+        .get_mut("sessions")
+        .unwrap_or(&mut Value::Array(Vec::new()))
+    {
+        for session in arr {
+            if let Value::Array(ref mut terms) = session
+                .get_mut("terminals")
+                .unwrap_or(&mut Value::Array(Vec::new()))
+            {
+                for term in terms {
+                    if let Some(config) = term.get_mut("config") {
+                        let processed = f(config.clone())?;
+                        *config = processed;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Load the unified session.json from the workspace root.
 /// On first run, migrates old per-session directories into the new format.
 #[tauri::command]
@@ -372,34 +398,39 @@ pub async fn load_sessions(app: AppHandle) -> Result<Value, String> {
     let ws = workspace_dir()?;
     let path = ws.join(SESSION_JSON);
 
-    if path.exists() {
+    let mut v: Value = if path.exists() {
         let bytes = fs::read(&path)
             .await
             .map_err(|e| format!("read session.json: {}", e))?;
-        let v: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("parse session.json: {}", e))?;
-        return Ok(v);
-    }
+        serde_json::from_slice(&bytes)
+            .map_err(|e| format!("parse session.json: {}", e))?
+    } else {
+        let old_root = ws.join(SESSIONS_DIR);
+        if fs::try_exists(&old_root).await.unwrap_or(false) {
+            let migrated = migrate_old_sessions(&app, &old_root, &ws).await?;
+            atomic_write_json(&path, &migrated).await?;
+            migrated
+        } else {
+            serde_json::json!({ "sessions": [] })
+        }
+    };
 
-    // No session.json yet — try migrating from old per-session directories
-    let old_root = ws.join(SESSIONS_DIR);
-    if fs::try_exists(&old_root).await.unwrap_or(false) {
-        let migrated = migrate_old_sessions(&app, &old_root, &ws).await?;
-        // Auto-save the migrated data so next load is fast
-        atomic_write_json(&path, &migrated).await?;
-        return Ok(migrated);
-    }
+    // Decrypt terminal config passwords
+    process_terminal_configs(&mut v, crate::storage::decrypt_config)?;
 
-    // Fresh start — return empty
-    Ok(serde_json::json!({ "sessions": [] }))
+    Ok(v)
 }
 
 /// Save the unified session.json to the workspace root (atomic).
+/// Encrypts terminal config passwords before writing.
 #[tauri::command]
 pub async fn save_sessions(
     _app: AppHandle,
-    data: Value,
+    mut data: Value,
 ) -> Result<(), String> {
+    // Encrypt terminal config passwords before persisting
+    process_terminal_configs(&mut data, crate::storage::encrypt_config)?;
+
     let ws = workspace_dir()?;
     ensure_dir(&ws).await?;
     let target = ws.join(SESSION_JSON);

@@ -6,6 +6,7 @@ pub mod executor;
 pub mod logger;
 pub mod output_sanitizer;
 pub mod persistence;
+pub mod server_manager;
 pub mod session_commands;
 pub mod shell;
 pub mod storage;

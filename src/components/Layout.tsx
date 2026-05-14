@@ -10,6 +10,7 @@ import { SessionTypeModal } from './SessionTypeModal';
 import { TerminalConnectModal } from './TerminalConnectModal';
 import { SessionManager } from './SessionManager';
 import { LogViewer } from './LogViewer';
+import { ServerManagementModal } from './ServerManagementModal';
 import { StatusBar } from './StatusBar';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
@@ -26,6 +27,7 @@ export function Layout() {
   const restoreTerminals = useSessionStore((s) => s.restoreTerminals);
   const { isEditorVisible, toggleEditor } = useUiStore();
   const [logsOpen, setLogsOpen] = useState(false);
+  const [serversOpen, setServersOpen] = useState(false);
 
   // Reactive selector: re-renders when activeTerminalIndex or terminals change
   const activeConnectionId = useSessionStore((s) => {
@@ -82,6 +84,7 @@ export function Layout() {
         isEditorVisible={isEditorVisible}
         onToggleEditor={toggleEditor}
         onToggleLogs={() => setLogsOpen((v) => !v)}
+        onToggleServers={() => setServersOpen((v) => !v)}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -158,6 +161,7 @@ export function Layout() {
       <TerminalConnectModal />
       <SessionManager />
       <LogViewer isOpen={logsOpen} onClose={() => setLogsOpen(false)} />
+      <ServerManagementModal isOpen={serversOpen} onClose={() => setServersOpen(false)} />
     </div>
   );
 }
