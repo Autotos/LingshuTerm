@@ -66,15 +66,17 @@ body {
   font-family: var(--mono);
 }
 
-/* xterm customization */
+/* xterm customization — let FitAddon manage dimensions */
 .xterm {
-  padding: 8px;
-  height: 100% !important; /* 强制占满父容器，覆盖 xterm.js 内联样式 */
+  padding: 4px;
+  box-sizing: border-box;
 }
 
+/* Ensure viewport fills the xterm container after resize */
 .xterm .xterm-viewport {
   overflow-y: auto;
-  height: 100% !important;
+  scroll-behavior: smooth;
+  width: 100% !important;
 }
 
 /* Scrollbar — Warp minimal */

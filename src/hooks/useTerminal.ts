@@ -7,6 +7,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { PtyOutputPayload, SessionErrorPayload } from '@/models/terminal';
 import { getWriteCommand, getResizeCommand } from '@/lib/sessionUtils';
 import { persistTerminalChunk } from '@/lib/persistenceSubscribe';
+import { useSettingsStore } from '@/stores/settingsStore';
 import '@xterm/xterm/css/xterm.css';
 
 // --- Diagnostic counter (Bug 1 investigation) ----------------------------
@@ -32,6 +33,19 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
   const connectionReadyRef = useRef(false);
   const inputBufferRef = useRef<string[]>([]);
 
+  // Track current sessionId for use in effects that only run once
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+
+  // Live-updating settings ref (avoids recreating effects on every setting change)
+  const terminalSettingsRef = useRef(useSettingsStore.getState().settings.terminal);
+  useEffect(() => {
+    const unsub = useSettingsStore.subscribe((state) => {
+      terminalSettingsRef.current = state.settings.terminal;
+    });
+    return unsub;
+  }, []);
+
   const flushInputBuffer = useCallback(() => {
     const buf = inputBufferRef.current;
     if (buf.length === 0 || !sessionId) return;
@@ -55,12 +69,29 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
 
     const container = containerRef.current;
 
+    // Estimate initial cols/rows from the container so the terminal
+    // never starts at the xterm.js default of 80×24.  FitAddon will
+    // fine-tune these to exact dimensions when the renderer is ready.
+    const fontSize = 13;
+    const estCharW = fontSize * 0.6; // ~7.8 px for typical monospace
+    const estCharH = fontSize * 1.5; // ~19.5 px
+    const estCols =
+      container.clientWidth > 0
+        ? Math.max(80, Math.min(500, Math.floor((container.clientWidth - 8) / estCharW)))
+        : 80;
+    const estRows =
+      container.clientHeight > 0
+        ? Math.max(24, Math.min(200, Math.floor(container.clientHeight / estCharH)))
+        : 24;
+
     const terminal = new Terminal({
       allowProposedApi: true,
       cursorBlink: true,
       cursorStyle: 'bar',
+      cols: estCols,
+      rows: estRows,
       fontFamily: 'Berkeley Mono, JetBrains Mono, SF Mono, Monaco, Menlo, Consolas, monospace',
-      fontSize: 13,
+      fontSize,
       lineHeight: 1.4,
       theme: {
         background: '#0e0e0d',
@@ -92,17 +123,18 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
 
-    // 1) 必须先 open，初始化 Terminal 的 _core / RenderService / Viewport
+    // 1) open → Canvas renderer active
     terminal.open(container);
 
-    // 2) 再加载 WebglAddon，否则内部访问 RenderService.dimensions 会报 undefined
+    // 2) Load WebglAddon NOW — before any fit or refresh.
+    //    A Canvas fit/refresh before WebGL can schedule async viewport
+    //    sync that fires after WebGL replaces the renderer, causing
+    //    "Cannot read properties of undefined (reading 'dimensions')".
+    //    The estimated cols/rows from the constructor keep the terminal
+    //    visually wide while WebGL initialises.
     let webglAddon: WebglAddon | null = null;
     try {
       webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => {
-        webglAddon?.dispose();
-        webglAddonRef.current = null;
-      });
       terminal.loadAddon(webglAddon);
       webglAddonRef.current = webglAddon;
     } catch (e) {
@@ -110,36 +142,29 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       webglAddon = null;
     }
 
-    // 3) Delayed fit — size correctly before any output renders.
-    // Focus is handled later by UnifiedSessionPanel when the connection is ready.
-    const timer = setTimeout(() => {
-      try {
-        if (container.clientWidth > 0 && container.clientHeight > 0) {
-          fitAddon.fit();
-        }
-      } catch (e) {
-        console.warn('fitAddon.fit() failed:', e);
-      }
-    }, 80);
+    // 3) Terminal ready.  The data-events effect owns the initial
+    //    fit (with WebGL-dimension retry) + backend notification.
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
     return () => {
-      clearTimeout(timer);
-      // 先卸载 WebGL，再 dispose terminal，并用 try/catch 容忍 StrictMode 下的重复调用
-      try {
-        webglAddonRef.current?.dispose();
-      } catch {
-        /* ignore */
-      }
-      webglAddonRef.current = null;
+      // Dispose terminal FIRST (it disposes addons internally),
+      // then clean up WebGL.  Reversing the order causes
+      // "Cannot read properties of undefined (reading 'dimensions')"
+      // because the renderer is gone before the terminal is stopped.
       try {
         terminal.dispose();
       } catch {
         /* ignore */
       }
       terminalRef.current = null;
+      try {
+        webglAddonRef.current?.dispose();
+      } catch {
+        /* ignore */
+      }
+      webglAddonRef.current = null;
       fitAddonRef.current = null;
     };
   }, [containerRef]);
@@ -219,7 +244,11 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     };
   }, [sessionId]);
 
-  // Setup terminal data events (user input → PTY) + resize
+  // Setup terminal data events (user input → PTY) + resize + initial sizing.
+  //
+  // The initial fit/resize lives HERE — inside the same effect that registers
+  // terminal.onResize.  This guarantees the resize signal ALWAYS reaches the
+  // backend PTY, regardless of React effect ordering or mount timing.
   useEffect(() => {
     if (!terminalRef.current || !sessionId) return;
 
@@ -241,35 +270,108 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       }
     });
 
-    const onResize = terminal.onResize(async ({ cols, rows }) => {
-      try {
-        await invoke(getResizeCommand(sessionId), { sessionId, cols, rows });
-      } catch (error) {
-        console.error('Failed to resize terminal:', error);
-      }
+    // Debounced resize.  The Rust backend handles PTY resize + atomic
+    // two-phase stty write (self-cleaning ANSI, zero visible output).
+    let resizeSeq = 0;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onResize = terminal.onResize(({ cols, rows }) => {
+      const seq = ++resizeSeq;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (seq !== resizeSeq) return;
+        invoke(getResizeCommand(sessionId), { sessionId, cols, rows }).catch(
+          (error) => console.error('Failed to resize terminal:', error),
+        );
+      }, 150);
     });
+
+    // ── Initial sizing ──────────────────────────────────────────
+    // Runs AFTER onResize is registered (same effect), so
+    // terminal.resize() → onResize → invoke reaches PTY.
+    //
+    // WebGL renderer cell dimensions may not be ready until a few
+    // frames after terminal.loadAddon(WebglAddon).  If fitAddon.fit()
+    // returns without changing cols the cell dims are probably still
+    // 0 → wait 100ms and retry (up to 5 times).
+    const fa = fitAddonRef.current;
+    const el = containerRef.current;
+    if (fa && el) {
+      let attempts = 0;
+      let fitRetries = 0;
+      const tryFit = () => {
+        if (el.clientWidth > 0 && el.clientHeight > 0) {
+          const { autoFit, defaultColumns, defaultRows } = terminalSettingsRef.current;
+          const prevCols = terminal.cols;
+          const prevRows = terminal.rows;
+          if (autoFit) {
+            fa.fit();
+          } else {
+            terminal.resize(defaultColumns, defaultRows);
+          }
+          // If fit() didn't change dimensions AND we're still
+          // stuck at narrow cols (Canvas fit didn't run), WebGL
+          // cell metrics probably aren't ready yet. Retry.
+          if (
+            autoFit &&
+            terminal.cols === prevCols &&
+            terminal.rows === prevRows &&
+            terminal.cols <= 80 &&
+            fitRetries < 5
+          ) {
+            fitRetries++;
+            setTimeout(tryFit, 100);
+            return;
+          }
+          terminal.refresh(0, terminal.rows - 1);
+          // Backend resize is handled by the onResize handler above
+          // (fires from fa.fit() / terminal.resize() → debounced → Rust).
+        } else if (attempts < 60) {
+          attempts++;
+          setTimeout(tryFit, 50);
+        }
+      };
+      requestAnimationFrame(() => tryFit());
+    }
 
     return () => {
       onData.dispose();
       onResize.dispose();
+      if (resizeTimer) clearTimeout(resizeTimer);
     };
   }, [sessionId]);
 
-  // ResizeObserver — 容器尺寸变化时自动 fit
-  // 处理：窗口缩放、Sidebar 展开/收起、视图切换（hidden→visible）等
+  // ResizeObserver — container resize → auto-fit (when enabled)
+  // Handles: window resize, sidebar collapse/expand, view switching (hidden → visible)
   useEffect(() => {
     const el = containerRef.current;
     if (!el || !fitAddonRef.current) return;
 
     let rafPending = false;
+    let roRetries = 0;
     const observer = new ResizeObserver(() => {
-      // 用 rAF 合并同一帧内的多次回调
+      if (!terminalSettingsRef.current.autoFit) return;
       if (rafPending) return;
       rafPending = true;
       requestAnimationFrame(() => {
         rafPending = false;
         try {
-          fitAddonRef.current?.fit();
+          const fa = fitAddonRef.current;
+          const t = terminalRef.current;
+          if (!fa || !t) return;
+          const prevCols = t.cols;
+          fa.fit();
+          // If cols didn't change (WebGL dims not ready), retry once
+          if (t.cols === 80 && t.cols === prevCols && roRetries < 3) {
+            roRetries++;
+            setTimeout(() => {
+              fa.fit();
+              t.refresh(0, t.rows - 1);
+            }, 150);
+            return;
+          }
+          roRetries = 0;
+          t.refresh(0, t.rows - 1);
         } catch {
           /* ignore */
         }
@@ -282,6 +384,31 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       observer.disconnect();
     };
   }, [containerRef]);
+
+  // React to settings changes: when autoFit or columns/rows change, reapply sizing.
+  useEffect(() => {
+    const unsub = useSettingsStore.subscribe((state, prev) => {
+      const next = state.settings.terminal;
+      const old = prev.settings.terminal;
+      if (
+        next.autoFit === old.autoFit &&
+        next.defaultColumns === old.defaultColumns &&
+        next.defaultRows === old.defaultRows
+      ) return;
+
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+
+      if (next.autoFit) {
+        // Switched to auto-fit: fit to container now
+        fitAddonRef.current?.fit();
+      } else {
+        // Switched to fixed size, or columns/rows changed while autoFit is off
+        terminal.resize(next.defaultColumns, next.defaultRows);
+      }
+    });
+    return unsub;
+  }, []);
 
   const createSession = useCallback(async (shell?: string, cwd?: string) => {
     // Routes through the unified `create_session(config)` entry point.

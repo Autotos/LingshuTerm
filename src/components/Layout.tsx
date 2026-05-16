@@ -81,7 +81,7 @@ export function Layout() {
 
           {/* ── Terminal + Editor drawer ── */}
           <div className="flex-1 min-h-0 flex flex-row overflow-hidden">
-            <div className="flex-1 min-w-0 overflow-hidden">
+            <div className="flex-1 min-w-0 overflow-hidden flex flex-col">
               {/* One xterm.js instance per terminal tab — only active is visible */}
               {Array.from(sessions.values()).map((s) => {
                 const isSessionActive = s.id === activeSessionId;
@@ -95,7 +95,7 @@ export function Layout() {
                       return (
                         <div
                           key={`term-${term.id}`}
-                          className={isActiveTerm ? 'h-full flex flex-col' : 'hidden'}
+                          className={isActiveTerm ? 'flex-1 flex flex-col min-h-0 min-w-0' : 'hidden'}
                         >
                           <UnifiedSessionPanel
                             sessionId={term.connectionId}

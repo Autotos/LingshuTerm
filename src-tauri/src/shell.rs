@@ -152,21 +152,55 @@ impl PtyManager {
         }
     }
 
-    /// Resize PTY terminal
+    /// Resize PTY terminal and notify the shell of new dimensions.
+    ///
+    /// Uses an atomic two-phase write so that no other PTY traffic
+    /// interleaves while echo is temporarily disabled:
+    ///
+    /// Phase 1: `stty -echo 2>/dev/null;: \x1b[2K\n`
+    ///   The ANSI EL (Erase in Line) sequence self-cleans the echo,
+    ///   making this line invisible.  The shell parses `: \x1b[2K` as
+    ///   a no-op.
+    ///
+    /// Phase 2 (50 ms later, echo off): resize + restore echo.
+    ///   Completely silent — terminal echo is disabled.
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<()> {
         let sessions = self.sessions.read();
-        if let Some(session) = sessions.get(session_id) {
-            session.master.0.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })?;
-            info!("Resized session {} to {}x{}", session_id, cols, rows);
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Session not found: {}", session_id))
-        }
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+
+        session.master.0.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        info!("Resized session {} to {}x{}", session_id, cols, rows);
+
+        // Atomically write both phases — hold the writer lock so user
+        // keystrokes queue up and are only written after echo is restored.
+        let mut writer = session
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Writer lock poisoned: {}", e))?;
+
+        // Phase 1: self-cleaning via ANSI \x1b[2K (erase entire line).
+        writer.write_all(b"stty -echo 2>/dev/null;: \x1b[2K\n")?;
+        writer.flush()?;
+
+        // Let the shell execute stty -echo before writing phase 2.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Phase 2: resize + restore echo (NOT echoed — echo is off).
+        let cmd = format!(
+            "stty cols {0} rows {1} 2>/dev/null;export COLUMNS={0} LINES={1};stty echo 2>/dev/null\n",
+            cols, rows
+        );
+        writer.write_all(cmd.as_bytes())?;
+        writer.flush()?;
+
+        Ok(())
     }
 
     /// Destroy a PTY session

@@ -16,6 +16,10 @@
     "core:event:allow-listen",
     "core:event:allow-emit",
     "shell:allow-open",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-confirm",
+    "dialog:allow-ask",
+    "dialog:allow-message",
+    "dialog:allow-save"
   ]
 }

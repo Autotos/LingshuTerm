@@ -72,6 +72,9 @@ struct ConnectionSession {
     _session_id: String,
     _protocol: String,
     writer: Mutex<Box<dyn Write + Send>>,
+    /// Channel to send resize events into the SSH I/O task.
+    /// `None` for non-SSH protocols where resize is unsupported.
+    resize_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>,
     shutdown_flag: Arc<AtomicBool>,
 }
 
@@ -189,6 +192,7 @@ impl ConnectionManager {
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, mut resize_rx) = tokio::sync::mpsc::unbounded_channel::<(u16, u16)>();
 
         let sid = session_id.clone();
         let flag = shutdown_flag.clone();
@@ -236,6 +240,9 @@ impl ConnectionManager {
                             break;
                         }
                     }
+                    Some((cols, rows)) = resize_rx.recv() => {
+                        let _ = channel.window_change(cols as u32, rows as u32, 0, 0).await;
+                    }
                 }
             }
             let _ = channel.close().await;
@@ -246,11 +253,12 @@ impl ConnectionManager {
             _session_id: session_id.clone(),
             _protocol: "ssh".to_string(),
             writer: Mutex::new(Box::new(TokioMpscWriter(tx))),
+            resize_tx: Mutex::new(Some(resize_tx)),
             shutdown_flag,
         };
 
         self.sessions.write().unwrap().insert(session_id.clone(), session);
-        info!(session_id = %session_id, "SSH connected");
+        //info!(session_id = %session_id, "SSH connected");
         Ok(session_id)
     }
 
@@ -327,6 +335,7 @@ impl ConnectionManager {
             _session_id: session_id.clone(),
             _protocol: "telnet".to_string(),
             writer: Mutex::new(Box::new(writer_stream)),
+            resize_tx: Mutex::new(None),
             shutdown_flag,
         };
 
@@ -423,6 +432,7 @@ impl ConnectionManager {
             _session_id: session_id.clone(),
             _protocol: "serial".to_string(),
             writer: Mutex::new(Box::new(writer_port)),
+            resize_tx: Mutex::new(None),
             shutdown_flag,
         };
 
@@ -473,10 +483,21 @@ impl ConnectionManager {
         Ok(command_id)
     }
 
-    pub fn resize(&self, session_id: &str, _cols: u16, _rows: u16) -> Result<()> {
+    pub fn resize(&self, session_id: &str, cols: u16, rows: u16) -> Result<()> {
         let sessions = self.sessions.read().unwrap();
-        if !sessions.contains_key(session_id) {
-            anyhow::bail!("Connection session not found: {}", session_id);
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Connection session not found: {}", session_id))?;
+
+        let tx_guard = session.resize_tx.lock().unwrap();
+        match &*tx_guard {
+            Some(tx) => {
+                tx.send((cols, rows))
+                    .map_err(|e| anyhow::anyhow!("Failed to send resize to SSH task: {}", e))?;
+            }
+            None => {
+                // Telnet / serial — resize not yet implemented.
+            }
         }
         Ok(())
     }

@@ -9,6 +9,9 @@ interface AppSettings {
     fontSize: number;
     fontFamily: string;
     scrollback: number;
+    autoFit: boolean;
+    defaultColumns: number;
+    defaultRows: number;
   };
   ai: AiConfig;
   logging: {
@@ -30,6 +33,9 @@ const defaultSettings: AppSettings = {
     fontSize: 13,
     fontFamily: 'Berkeley Mono, JetBrains Mono, SF Mono, Monaco, Menlo, Consolas, monospace',
     scrollback: 10000,
+    autoFit: true,
+    defaultColumns: 80,
+    defaultRows: 24,
   },
   ai: defaultAiConfig,
   logging: {

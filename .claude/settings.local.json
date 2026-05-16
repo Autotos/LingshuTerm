@@ -7,7 +7,12 @@
       "Bash(npx vitest *)",
       "Bash(npm run *)",
       "Bash(npm ls *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Bash(node -e \"const p = require\\('./node_modules/@xterm/addon-fit/package.json'\\); console.log\\('addon-fit:', p.version\\)\")",
+      "Bash(node -e \"const p = require\\('./node_modules/@xterm/xterm/package.json'\\); console.log\\('xterm:', p.version\\)\")",
+      "Bash(cargo clean *)",
+      "Bash(tasklist)",
+      "Bash(cargo doc *)"
     ]
   }
 }

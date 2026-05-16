@@ -212,9 +212,9 @@ function TerminalSettings({
   onUpdateTerminal,
   onUpdateShell,
 }: {
-  terminal: { fontSize: number; fontFamily: string; scrollback: number };
+  terminal: { fontSize: number; fontFamily: string; scrollback: number; autoFit: boolean; defaultColumns: number; defaultRows: number };
   shell: { path: string; args: string[] };
-  onUpdateTerminal: (patch: Partial<{ fontSize: number; fontFamily: string; scrollback: number }>) => void;
+  onUpdateTerminal: (patch: Partial<{ fontSize: number; fontFamily: string; scrollback: number; autoFit: boolean; defaultColumns: number; defaultRows: number }>) => void;
   onUpdateShell: (patch: Partial<{ path: string; args: string[] }>) => void;
 }) {
   return (
@@ -260,6 +260,52 @@ function TerminalSettings({
             step={1000}
           />
         </Field>
+      </div>
+
+      {/* ── Auto-fit & default dimensions ── */}
+      <div className="border-t border-[var(--border)] pt-4 mt-2">
+        <h4 className="text-[10px] uppercase tracking-wide text-[var(--text-3)] mb-3">Window Sizing</h4>
+
+        <label className="flex items-center gap-3 cursor-pointer mb-3">
+          <input
+            type="checkbox"
+            checked={terminal.autoFit}
+            onChange={(e) => onUpdateTerminal({ autoFit: e.target.checked })}
+            className="w-3.5 h-3.5 rounded border-[var(--border)] bg-[var(--void)] accent-[var(--accent)]"
+          />
+          <span className="text-[12px] text-[var(--text-2)]">Auto-fit to window</span>
+        </label>
+
+        {!terminal.autoFit && (
+          <div className="flex gap-3">
+            <Field label="Columns" className="flex-1">
+              <input
+                type="number"
+                className="settings-input"
+                value={terminal.defaultColumns}
+                onChange={(e) => onUpdateTerminal({ defaultColumns: Math.max(20, Math.min(500, parseInt(e.target.value) || 80)) })}
+                min={20}
+                max={500}
+              />
+            </Field>
+            <Field label="Rows" className="flex-1">
+              <input
+                type="number"
+                className="settings-input"
+                value={terminal.defaultRows}
+                onChange={(e) => onUpdateTerminal({ defaultRows: Math.max(5, Math.min(200, parseInt(e.target.value) || 24)) })}
+                min={5}
+                max={200}
+              />
+            </Field>
+          </div>
+        )}
+
+        {!terminal.autoFit && (
+          <p className="text-[10px] text-[var(--text-4)] mt-2">
+            Fixed dimensions; terminal will not resize with the window.
+          </p>
+        )}
       </div>
     </>
   );
