@@ -27,9 +27,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 # 使用 ring 作为加密后端，避免 Windows 下编译 aws-lc-sys 需要 NASM 的问题
 russh = { version = "0.60", default-features = false, features = ["ring", "flate2"] }
+russh-sftp = "2.1"
 async-trait = "0.1"
 serialport = "4.3"
 regex = "1"
 # AES-GCM encryption for connection password storage
 ring = "0.17"
 base64 = "0.22"
+# HTTP client for AI API proxy (bypasses browser CORS)
+reqwest = { version = "0.12", features = ["json"] }

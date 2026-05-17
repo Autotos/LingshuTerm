@@ -6,6 +6,24 @@ use tauri::State;
 // entry point lives in `session_commands::create_session`, which dispatches
 // local PTY creation to `PtyManager::create_session` directly.
 
+/// Query the shell's current working directory.
+/// For local PTY sessions: writes a hidden `pwd` command and captures the response.
+/// For SSH sessions: writes a hidden `pwd` command and captures via output scanning.
+#[tauri::command]
+pub async fn get_terminal_cwd(
+    pty: State<'_, PtyManager>,
+    conn: State<'_, ConnectionManager>,
+    session_id: String,
+) -> Result<String, String> {
+    if session_id.starts_with("session-") {
+        pty.query_cwd(&session_id).map_err(|e| e.to_string())
+    } else if session_id.starts_with("ssh-") {
+        conn.query_cwd(&session_id).await.map_err(|e| e.to_string())
+    } else {
+        Err("CWD query only supported for local PTY and SSH sessions".to_string())
+    }
+}
+
 /// Write input to terminal
 #[tauri::command]
 pub async fn write_to_terminal(

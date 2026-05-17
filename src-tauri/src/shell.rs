@@ -41,6 +41,8 @@ pub struct PtyManager {
     app_handle: Arc<RwLock<Option<AppHandle>>>,
     /// Per-session unified stream cores (replaces separate MarkerScanner + StreamCleaner maps).
     stream_cores: Arc<std::sync::Mutex<HashMap<String, UnifiedStreamCore>>>,
+    /// Pending CWD queries: session_id → (marker_token, response_sender)
+    cwd_queries: Arc<std::sync::Mutex<HashMap<String, (String, std::sync::mpsc::Sender<String>)>>>,
 }
 
 impl PtyManager {
@@ -50,6 +52,7 @@ impl PtyManager {
             next_id: AtomicUsize::new(1),
             app_handle: Arc::new(RwLock::new(None)),
             stream_cores: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cwd_queries: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -103,8 +106,9 @@ impl PtyManager {
         if let Some(app) = self.app_handle.read().clone() {
             let sid = session_id.clone();
             let cores = Arc::clone(&self.stream_cores);
+            let queries = Arc::clone(&self.cwd_queries);
             std::thread::spawn(move || {
-                Self::read_pty_output(reader, &sid, &app, cores);
+                Self::read_pty_output(reader, &sid, &app, cores, queries);
             });
         }
 
@@ -234,6 +238,52 @@ impl PtyManager {
         Ok(())
     }
 
+    /// Query the shell's current working directory.
+    /// Writes a single `echo` command and captures the response from the output stream.
+    /// The user sees one line of output (e.g. `CWD:/home/user`) which scrolls away naturally.
+    pub fn query_cwd(&self, session_id: &str) -> Result<String> {
+        let token = format!("{:x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos());
+        let marker = format!("__CWD_{}__", token);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        {
+            let mut queries = self.cwd_queries.lock().unwrap();
+            queries.insert(session_id.to_string(), (marker.clone(), tx));
+        }
+
+        {
+            let sessions = self.sessions.read();
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+
+            let mut writer = session.writer.lock()
+                .map_err(|e| anyhow::anyhow!("Writer lock poisoned: {}", e))?;
+
+            // Single clean command — the user sees this briefly as:
+            //   echo "__CWD_token__ $(pwd -P)"
+            //   __CWD_token__ /home/user
+            let cmd = format!(
+                "echo \"{} $(pwd -P 2>/dev/null || echo UNKNOWN)\"\n",
+                marker
+            );
+            writer.write_all(cmd.as_bytes())?;
+            writer.flush()?;
+        }
+
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(path) => Ok(path.trim().to_string()),
+            Err(_) => {
+                self.cwd_queries.lock().unwrap().remove(session_id);
+                Err(anyhow::anyhow!("CWD query timed out for session: {}", session_id))
+            }
+        }
+    }
+
     /// Execute a command in block mode: wraps user command with OSC 7701 markers,
     /// writes it to the PTY, and returns the generated command_id.
     pub fn execute_block_command(&self, session_id: &str, command: &str) -> Result<String> {
@@ -272,6 +322,7 @@ impl PtyManager {
         session_id: &str,
         app: &AppHandle,
         stream_cores: Arc<std::sync::Mutex<HashMap<String, UnifiedStreamCore>>>,
+        cwd_queries: Arc<std::sync::Mutex<HashMap<String, (String, std::sync::mpsc::Sender<String>)>>>,
     ) {
         let session_id = session_id.to_string();
         let app = app.clone();
@@ -292,12 +343,29 @@ impl PtyManager {
                             core.process_chunk(chunk, &session_id, &app);
                         }
                     }
-                    
+
+                    // Scan for CWD query markers (zero-overhead when no pending queries)
+                    {
+                        let mut queries = cwd_queries.lock().unwrap();
+                        if let Some((marker, tx)) = queries.remove(&session_id) {
+                            if let Ok(text) = std::str::from_utf8(chunk) {
+                                // Look for the marker followed by a path
+                                let prefix = format!("{} ", marker);
+                                if let Some(pos) = text.find(&prefix) {
+                                    let after = &text[pos + prefix.len()..];
+                                    let path = after.lines().next().unwrap_or("").trim().to_string();
+                                    if !path.is_empty() && path != "UNKNOWN" {
+                                        let _ = tx.send(path);
+                                    }
+                                } else if text.contains(&marker) {
+                                    // Re-insert the query for the next chunk
+                                    queries.insert(session_id.clone(), (marker, tx));
+                                }
+                            }
+                        }
+                    }
+
                     // Smart throttle: aggressively limit high-frequency small chunks.
-                    // < 128B: 1ms sleep (Ctrl+C ~3B gets 1ms delay, still responsive)
-                    // 128B-512B: 2ms sleep (prompts, small responses)
-                    // 512B-2KB: 4ms sleep (moderate output)
-                    // >= 2KB: 8ms sleep (heavy output like du -h)
                     if n >= 2048 {
                         std::thread::sleep(std::time::Duration::from_millis(8));
                     } else if n >= 512 {

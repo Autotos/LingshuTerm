@@ -1,29 +1,23 @@
 import { useState, useCallback } from 'react';
-import { X, Zap, Terminal, Loader2, CheckCircle2, XCircle, ScrollText } from 'lucide-react';
+import { X, Zap, Terminal, Loader2, CheckCircle2, XCircle, ScrollText, Plus, Trash2 } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useUiStore } from '@/stores/uiStore';
-import { AI_PRESETS, testConnection } from '@/lib/aiService';
-import type { AiConfig } from '@/lib/aiService';
+import { AI_PRESETS, testConnection, resolveProvider } from '@/lib/aiService';
+import type { AiConfig, AiProviderConfig } from '@/lib/aiService';
 
 type SettingsTab = 'ai' | 'terminal' | 'logging';
 
 export function SettingsModal() {
   const { settingsOpen, setSettingsOpen } = useUiStore();
-  const { settings, updateAiSettings, updateSettings } = useSettingsStore();
+  const { settings, updateAiSettings, updateProvider, addProvider, removeProvider, updateSettings } = useSettingsStore();
   const [tab, setTab] = useState<SettingsTab>('ai');
 
   if (!settingsOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-        onClick={() => setSettingsOpen(false)}
-      />
-      {/* Modal */}
-      <div className="relative w-[560px] max-h-[80vh] bg-[var(--deep)] border border-[var(--border)] rounded-lg overflow-hidden flex flex-col animate-block-in">
-        {/* Header */}
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setSettingsOpen(false)} />
+      <div className="relative w-[600px] max-h-[85vh] bg-[var(--deep)] border border-[var(--border)] rounded-lg overflow-hidden flex flex-col animate-block-in">
         <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border)]">
           <span className="text-[13px] font-medium text-[var(--text-1)]">Settings</span>
           <button
@@ -34,17 +28,21 @@ export function SettingsModal() {
           </button>
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-1 px-5 pt-3">
           <TabBtn icon={<Zap className="w-3.5 h-3.5" />} label="AI" active={tab === 'ai'} onClick={() => setTab('ai')} />
           <TabBtn icon={<Terminal className="w-3.5 h-3.5" />} label="Terminal" active={tab === 'terminal'} onClick={() => setTab('terminal')} />
           <TabBtn icon={<ScrollText className="w-3.5 h-3.5" />} label="Logging" active={tab === 'logging'} onClick={() => setTab('logging')} />
         </div>
 
-        {/* Content */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           {tab === 'ai' ? (
-            <AiSettings config={settings.ai} onUpdate={updateAiSettings} />
+            <AiSettings
+              config={settings.ai}
+              onSetCurrent={(id) => updateAiSettings({ currentProviderId: id })}
+              onUpdateProvider={updateProvider}
+              onAddProvider={addProvider}
+              onRemoveProvider={removeProvider}
+            />
           ) : tab === 'terminal' ? (
             <TerminalSettings
               terminal={settings.terminal}
@@ -80,21 +78,26 @@ function TabBtn({ icon, label, active, onClick }: { icon: React.ReactNode; label
   );
 }
 
-// ---- AI Settings Panel ----
+// ---- AI Settings Panel (multi-provider) ----
 
-function AiSettings({ config, onUpdate }: { config: AiConfig; onUpdate: (patch: Partial<AiConfig>) => void }) {
+function AiSettings({
+  config,
+  onSetCurrent,
+  onUpdateProvider,
+  onAddProvider,
+  onRemoveProvider,
+}: {
+  config: AiConfig;
+  onSetCurrent: (id: string) => void;
+  onUpdateProvider: (id: string, patch: Partial<AiProviderConfig>) => void;
+  onAddProvider: (presetKey?: string) => void;
+  onRemoveProvider: (id: string) => void;
+}) {
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [testError, setTestError] = useState('');
+  const [showPresets, setShowPresets] = useState(false);
 
-  const handlePreset = useCallback(
-    (key: string) => {
-      const preset = AI_PRESETS[key];
-      if (preset) {
-        onUpdate({ baseUrl: preset.baseUrl, model: preset.defaultModel });
-      }
-    },
-    [onUpdate],
-  );
+  const current = resolveProvider(config);
 
   const handleTest = useCallback(async () => {
     setTestStatus('testing');
@@ -108,28 +111,78 @@ function AiSettings({ config, onUpdate }: { config: AiConfig; onUpdate: (patch: 
     }
   }, [config]);
 
+  const handleAddPreset = useCallback((key: string) => {
+    onAddProvider(key);
+    setShowPresets(false);
+  }, [onAddProvider]);
+
   return (
     <>
-      {/* Preset selector */}
-      <Field label="Provider Preset">
-        <select
-          className="settings-input"
-          onChange={(e) => handlePreset(e.target.value)}
-          defaultValue=""
-        >
-          <option value="" disabled>Select a preset...</option>
+      {/* Provider selector */}
+      <div className="flex items-end gap-2">
+        <Field label="Active Provider" className="flex-1">
+          <select
+            className="settings-input"
+            value={config.currentProviderId}
+            onChange={(e) => onSetCurrent(e.target.value)}
+          >
+            {config.providers.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </Field>
+        <div className="flex gap-1 pb-px">
+          <button
+            onClick={() => setShowPresets((v) => !v)}
+            className="h-[30px] px-2 flex items-center gap-1 rounded text-[10px] bg-[var(--veil)] border border-[var(--border)] text-[var(--text-2)] hover:text-[var(--text-1)] transition-all"
+            title="Add provider from preset"
+          >
+            <Plus className="w-3 h-3" />
+            Add
+          </button>
+          {config.providers.length > 1 && (
+            <button
+              onClick={() => onRemoveProvider(current.id)}
+              className="h-[30px] px-2 flex items-center gap-1 rounded text-[10px] bg-[var(--veil)] border border-[var(--border)] text-[var(--text-3)] hover:text-[var(--red)] transition-all"
+              title="Remove current provider"
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Preset quick-add dropdown */}
+      {showPresets && (
+        <div className="grid grid-cols-2 gap-1 p-2 bg-[var(--void)] border border-[var(--border)] rounded">
           {Object.entries(AI_PRESETS).map(([key, p]) => (
-            <option key={key} value={key}>{p.label}</option>
+            <button
+              key={key}
+              onClick={() => handleAddPreset(key)}
+              className="text-left px-2 py-1 rounded text-[10px] text-[var(--text-2)] hover:bg-[var(--veil)] hover:text-[var(--text-1)] transition-all"
+            >
+              {p.label}
+            </button>
           ))}
-        </select>
+        </div>
+      )}
+
+      <Field label="Provider Name">
+        <input
+          type="text"
+          className="settings-input"
+          value={current.name}
+          onChange={(e) => onUpdateProvider(current.id, { name: e.target.value })}
+          placeholder="My Provider"
+        />
       </Field>
 
       <Field label="API Base URL">
         <input
           type="text"
           className="settings-input"
-          value={config.baseUrl}
-          onChange={(e) => onUpdate({ baseUrl: e.target.value })}
+          value={current.baseUrl}
+          onChange={(e) => onUpdateProvider(current.id, { baseUrl: e.target.value })}
           placeholder="https://api.openai.com/v1"
         />
       </Field>
@@ -138,8 +191,8 @@ function AiSettings({ config, onUpdate }: { config: AiConfig; onUpdate: (patch: 
         <input
           type="password"
           className="settings-input"
-          value={config.apiKey}
-          onChange={(e) => onUpdate({ apiKey: e.target.value })}
+          value={current.apiKey}
+          onChange={(e) => onUpdateProvider(current.id, { apiKey: e.target.value })}
           placeholder="sk-... (local models can leave empty)"
         />
       </Field>
@@ -148,8 +201,8 @@ function AiSettings({ config, onUpdate }: { config: AiConfig; onUpdate: (patch: 
         <input
           type="text"
           className="settings-input"
-          value={config.model}
-          onChange={(e) => onUpdate({ model: e.target.value })}
+          value={current.model}
+          onChange={(e) => onUpdateProvider(current.id, { model: e.target.value })}
           placeholder="gpt-4o-mini"
         />
       </Field>
@@ -159,27 +212,22 @@ function AiSettings({ config, onUpdate }: { config: AiConfig; onUpdate: (patch: 
           <input
             type="number"
             className="settings-input"
-            value={config.temperature}
-            onChange={(e) => onUpdate({ temperature: parseFloat(e.target.value) || 0 })}
-            min={0}
-            max={2}
-            step={0.1}
+            value={current.temperature}
+            onChange={(e) => onUpdateProvider(current.id, { temperature: parseFloat(e.target.value) || 0 })}
+            min={0} max={2} step={0.1}
           />
         </Field>
         <Field label="Max Tokens" className="flex-1">
           <input
             type="number"
             className="settings-input"
-            value={config.maxTokens}
-            onChange={(e) => onUpdate({ maxTokens: parseInt(e.target.value) || 1024 })}
-            min={128}
-            max={32768}
-            step={256}
+            value={current.maxTokens}
+            onChange={(e) => onUpdateProvider(current.id, { maxTokens: parseInt(e.target.value) || 1024 })}
+            min={128} max={32768} step={256}
           />
         </Field>
       </div>
 
-      {/* Test connection */}
       <div className="flex items-center gap-3 pt-1">
         <button
           onClick={handleTest}

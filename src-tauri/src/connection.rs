@@ -76,11 +76,15 @@ struct ConnectionSession {
     /// `None` for non-SSH protocols where resize is unsupported.
     resize_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<(u16, u16)>>>,
     shutdown_flag: Arc<AtomicBool>,
+    /// Preserved SSH handle for SFTP operations.  Only set for SSH sessions.
+    /// Wrapped in Arc so it can be shared with SFTP channel operations
+    /// without cloning `Handle` (which doesn't implement Clone).
+    ssh_handle: Mutex<Option<Arc<russh::client::Handle<SshHandler>>>>,
 }
 
 // ─── SSH client handler (russh) ──────────────────────────────
 
-struct SshHandler;
+pub struct SshHandler;
 
 impl russh::client::Handler for SshHandler {
     type Error = anyhow::Error;
@@ -101,6 +105,8 @@ pub struct ConnectionManager {
     app_handle: Arc<RwLock<Option<AppHandle>>>,
     /// Per-session unified stream cores (3.0: replaces separate MarkerScanner + StreamCleaner maps).
     stream_cores: Arc<std::sync::Mutex<HashMap<String, UnifiedStreamCore>>>,
+    /// Pending SSH CWD queries: session_id → (marker_token, response_sender)
+    cwd_queries: Arc<std::sync::Mutex<HashMap<String, (String, std::sync::mpsc::Sender<String>)>>>,
 }
 
 impl ConnectionManager {
@@ -114,6 +120,7 @@ impl ConnectionManager {
             next_ids: Mutex::new(ids),
             app_handle: Arc::new(RwLock::new(None)),
             stream_cores: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cwd_queries: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -130,6 +137,66 @@ impl ConnectionManager {
 
     fn get_app_handle(&self) -> Option<AppHandle> {
         self.app_handle.read().unwrap().clone()
+    }
+
+    /// Retrieve a clone of the Arc-wrapped SSH handle for SFTP operations.
+    ///
+    /// `Handle::channel_open_session()` takes `&self`, so we can share
+    /// the handle via Arc without consuming it.
+    pub fn get_ssh_handle(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<russh::client::Handle<SshHandler>>> {
+        let sessions = self.sessions.read().unwrap();
+        let session = sessions.get(session_id)?;
+        let guard = session.ssh_handle.lock().unwrap();
+        guard.as_ref().map(Arc::clone)
+    }
+
+    /// Query the remote shell's current working directory via SSH.
+    /// Writes a single `echo` command and captures the response.
+    /// The user sees one line of output which scrolls away naturally.
+    pub async fn query_cwd(&self, session_id: &str) -> Result<String> {
+        let token = format!("{:x}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos());
+        let marker = format!("__CWD_{}__", token);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        {
+            let mut queries = self.cwd_queries.lock().unwrap();
+            queries.insert(session_id.to_string(), (marker.clone(), tx));
+        }
+
+        {
+            let sessions = self.sessions.read().unwrap();
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| anyhow::anyhow!("SSH session not found: {}", session_id))?;
+            let mut writer = session.writer.lock()
+                .map_err(|e| anyhow::anyhow!("Writer lock poisoned: {}", e))?;
+            let cmd = format!(
+                "echo \"{} $(pwd -P 2>/dev/null || echo UNKNOWN)\"\n",
+                marker
+            );
+            writer.write_all(cmd.as_bytes())?;
+            writer.flush()?;
+        }
+
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(path) => Ok(path.trim().to_string()),
+            Err(_) => {
+                self.cwd_queries.lock().unwrap().remove(session_id);
+                Err(anyhow::anyhow!("CWD query timed out for SSH session: {}", session_id))
+            }
+        }
+    }
+
+    /// Remove a session from the manager (called on disconnect or SFTP cleanup).
+    pub fn remove_session(&self, session_id: &str) {
+        self.sessions.write().unwrap().remove(session_id);
     }
 
     // ─── Unified connect (async — SSH requires async) ────────
@@ -203,8 +270,12 @@ impl ConnectionManager {
             cores.insert(session_id.clone(), UnifiedStreamCore::new());
         }
         let stream_cores = Arc::clone(&self.stream_cores);
+        let cwd_queries = Arc::clone(&self.cwd_queries);
 
-        // Spawn async reader/writer task
+        // Spawn async reader/writer task.
+        // The handle is NOT moved into the task — Channel holds its own
+        // reference to the underlying connection.  Handle stays in
+        // ConnectionSession for SFTP use and is dropped on session removal.
         tokio::spawn(async move {
             let mut channel = channel;
             loop {
@@ -221,14 +292,31 @@ impl ConnectionManager {
                                 
                                 if let Some(ref app) = app {
                                     // 3.0: single pipeline through UnifiedStreamCore
-                                    // Scope the lock so guard is dropped before sleep
                                     {
                                         if let Ok(mut guard) = stream_cores.lock() {
                                             if let Some(core) = guard.get_mut(&sid) {
                                                 core.process_chunk(bytes, &sid, app);
                                             }
                                         }
-                                        // guard dropped here
+                                    }
+
+                                    // Scan for CWD query markers (zero-overhead when no pending queries)
+                                    {
+                                        let mut queries = cwd_queries.lock().unwrap();
+                                        if let Some((marker, tx)) = queries.remove(&sid) {
+                                            if let Ok(text) = std::str::from_utf8(bytes) {
+                                                let prefix = format!("{} ", marker);
+                                                if let Some(pos) = text.find(&prefix) {
+                                                    let after = &text[pos + prefix.len()..];
+                                                    let path = after.lines().next().unwrap_or("").trim().to_string();
+                                                    if !path.is_empty() && path != "UNKNOWN" {
+                                                        let _ = tx.send(path);
+                                                    }
+                                                } else if text.contains(&marker) {
+                                                    queries.insert(sid.clone(), (marker, tx));
+                                                }
+                                            }
+                                        }
                                     }
                                     
                                     // Now apply throttle AFTER releasing the lock
@@ -264,7 +352,7 @@ impl ConnectionManager {
                 }
             }
             let _ = channel.close().await;
-            drop(handle);
+            // handle is dropped when ConnectionSession is removed from the manager
         });
 
         let session = ConnectionSession {
@@ -273,6 +361,7 @@ impl ConnectionManager {
             writer: Mutex::new(Box::new(TokioMpscWriter(tx))),
             resize_tx: Mutex::new(Some(resize_tx)),
             shutdown_flag,
+            ssh_handle: Mutex::new(Some(Arc::new(handle))),
         };
 
         self.sessions.write().unwrap().insert(session_id.clone(), session);
@@ -366,6 +455,7 @@ impl ConnectionManager {
             writer: Mutex::new(Box::new(writer_stream)),
             resize_tx: Mutex::new(None),
             shutdown_flag,
+            ssh_handle: Mutex::new(None),
         };
 
         self.sessions.write().unwrap().insert(session_id.clone(), session);
@@ -463,6 +553,7 @@ impl ConnectionManager {
             writer: Mutex::new(Box::new(writer_port)),
             resize_tx: Mutex::new(None),
             shutdown_flag,
+            ssh_handle: Mutex::new(None),
         };
 
         self.sessions.write().unwrap().insert(session_id.clone(), session);

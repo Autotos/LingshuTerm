@@ -6,6 +6,8 @@ interface UiState {
   sidebarCollapsed: boolean;
   /** Whether the right-side editor drawer is open. */
   isEditorVisible: boolean;
+  /** Whether the right-side SFTP file explorer is open. */
+  isSftpVisible: boolean;
   sidebarTab: SidebarTab;
   settingsOpen: boolean;
   /** Whether the "New Session" modal (SessionTypeModal) is visible. */
@@ -18,6 +20,7 @@ interface UiState {
   terminalModalSessionId: string | null;
   toggleSidebar: () => void;
   toggleEditor: () => void;
+  toggleSftp: () => void;
   setSidebarTab: (tab: SidebarTab) => void;
   setSettingsOpen: (open: boolean) => void;
   openCreateSessionModal: () => void;
@@ -30,6 +33,7 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   sidebarCollapsed: false,
   isEditorVisible: false,
+  isSftpVisible: false,
   sidebarTab: 'sessions',
   settingsOpen: false,
   sessionModalOpen: false,
@@ -38,6 +42,7 @@ export const useUiStore = create<UiState>((set) => ({
   terminalModalSessionId: null,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   toggleEditor: () => set((s) => ({ isEditorVisible: !s.isEditorVisible })),
+  toggleSftp: () => set((s) => ({ isSftpVisible: !s.isSftpVisible })),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
   setSettingsOpen: (open) => set({ settingsOpen: open }),
   openCreateSessionModal: () => set({ sessionModalOpen: true }),

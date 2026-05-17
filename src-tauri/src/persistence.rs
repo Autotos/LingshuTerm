@@ -489,3 +489,44 @@ pub async fn clear_session(app: AppHandle, session_id: String) -> Result<(), Str
         Err(e) => Err(format!("remove_dir_all {:?} failed: {}", dir, e)),
     }
 }
+
+// ── Global settings persistence ──────────────────────────────────
+
+const SETTINGS_FILE: &str = ".terminal-settings.json";
+
+#[tauri::command]
+pub async fn save_settings(content: String) -> Result<(), String> {
+    let dir = workspace_dir()?;
+    let path = dir.join(SETTINGS_FILE);
+    let tmp = dir.join(format!("{}.tmp", SETTINGS_FILE));
+
+    // Atomic write: write to .tmp then rename
+    let mut f = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| format!("Failed to create settings temp file: {}", e))?;
+    f.write_all(content.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write settings: {}", e))?;
+    f.flush()
+        .await
+        .map_err(|e| format!("Failed to flush settings: {}", e))?;
+
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| format!("Failed to rename settings file: {}", e))?;
+
+    tracing::info!("Settings saved to {:?}", path);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn load_settings() -> Result<Option<String>, String> {
+    let dir = workspace_dir()?;
+    let path = dir.join(SETTINGS_FILE);
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read settings: {}", e)),
+    }
+}

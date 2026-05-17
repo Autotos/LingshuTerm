@@ -1,6 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { nlToTasks, testConnection, AI_PRESETS, defaultAiConfig } from '@/lib/aiService';
-import type { AiConfig } from '@/lib/aiService';
+import { nlToTasks, testConnection, AI_PRESETS, defaultAiConfig, resolveProvider } from '@/lib/aiService';
+import type { AiConfig, AiProviderConfig } from '@/lib/aiService';
+
+function makeConfig(overrides: Partial<AiProviderConfig> = {}): AiConfig {
+  const provider: AiProviderConfig = {
+    id: 'test-provider',
+    name: 'Test',
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'test-key',
+    model: 'test-model',
+    maxTokens: 1024,
+    temperature: 0.3,
+    ...overrides,
+  };
+  return { currentProviderId: provider.id, providers: [provider] };
+}
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -28,22 +42,17 @@ describe('AI_PRESETS', () => {
 
 describe('defaultAiConfig', () => {
   it('should have sensible defaults', () => {
-    expect(defaultAiConfig.baseUrl).toContain('dashscope');
-    expect(defaultAiConfig.model).toBe('qwen-turbo');
-    expect(defaultAiConfig.maxTokens).toBeGreaterThan(0);
-    expect(defaultAiConfig.temperature).toBeGreaterThanOrEqual(0);
-    expect(defaultAiConfig.temperature).toBeLessThanOrEqual(2);
+    const p = resolveProvider(defaultAiConfig);
+    expect(p.baseUrl).toContain('dashscope');
+    expect(p.model).toBe('qwen-turbo');
+    expect(p.maxTokens).toBeGreaterThan(0);
+    expect(p.temperature).toBeGreaterThanOrEqual(0);
+    expect(p.temperature).toBeLessThanOrEqual(2);
   });
 });
 
 describe('nlToTasks', () => {
-  const config: AiConfig = {
-    baseUrl: 'https://api.example.com/v1',
-    apiKey: 'test-key',
-    model: 'test-model',
-    maxTokens: 1024,
-    temperature: 0.3,
-  };
+  const config = makeConfig();
 
   it('should parse a valid JSON array response', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -160,20 +169,14 @@ describe('nlToTasks', () => {
         }),
     });
 
-    await nlToTasks({ ...config, apiKey: '' }, 'test');
+    await nlToTasks(makeConfig({ apiKey: '' }), 'test');
     const callArgs = mockFetch.mock.calls[0];
     expect(callArgs[1].headers['Authorization']).toBeUndefined();
   });
 });
 
 describe('testConnection', () => {
-  const config: AiConfig = {
-    baseUrl: 'https://api.example.com/v1',
-    apiKey: 'key',
-    model: 'model',
-    maxTokens: 1024,
-    temperature: 0.3,
-  };
+  const config = makeConfig({ baseUrl: 'https://api.example.com/v1', apiKey: 'key', model: 'model' });
 
   it('should return response content on success', async () => {
     mockFetch.mockResolvedValueOnce({
@@ -197,7 +200,7 @@ describe('testConnection', () => {
         }),
     });
 
-    await testConnection({ ...config, baseUrl: 'https://api.example.com/v1/' });
+    await testConnection(makeConfig({ baseUrl: 'https://api.example.com/v1/' }));
     const url = mockFetch.mock.calls[0][0];
     expect(url).toBe('https://api.example.com/v1/chat/completions');
   });

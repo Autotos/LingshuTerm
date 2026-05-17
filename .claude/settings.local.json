@@ -12,7 +12,10 @@
       "Bash(node -e \"const p = require\\('./node_modules/@xterm/xterm/package.json'\\); console.log\\('xterm:', p.version\\)\")",
       "Bash(cargo clean *)",
       "Bash(tasklist)",
-      "Bash(cargo doc *)"
+      "Bash(cargo doc *)",
+      "Bash(cargo search *)",
+      "Bash(cargo build *)",
+      "Bash(ls node_modules/@tauri-apps/)"
     ]
   }
 }

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { TitleBar } from './TitleBar';
 import { Sidebar } from './Sidebar';
 import { EditorPanel } from './EditorPanel';
+import { SftpPanel } from './SftpPanel';
 import { TerminalTabBar } from './TerminalTabBar';
 import { UnifiedSessionPanel } from './UnifiedSessionPanel';
 import { BottomInputArea } from './BottomInputArea';
@@ -14,6 +15,7 @@ import { ServerManagementModal } from './ServerManagementModal';
 import { StatusBar } from './StatusBar';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useConnectionStore } from '@/stores/connectionStore';
 import { useBlockSession } from '@/hooks/useBlockSession';
 import { useAiSubmit } from '@/hooks/useAiSubmit';
@@ -23,7 +25,7 @@ import { usePersistenceBootstrap } from '@/hooks/usePersistenceBootstrap';
 export function Layout() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
-  const { isEditorVisible, toggleEditor } = useUiStore();
+  const { isEditorVisible, isSftpVisible, toggleEditor, toggleSftp } = useUiStore();
   const [logsOpen, setLogsOpen] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
 
@@ -38,9 +40,11 @@ export function Layout() {
   const persistence = usePersistenceBootstrap();
 
   const loadConnections = useConnectionStore((s) => s.loadFromDisk);
+  const loadSettings = useSettingsStore((s) => s.loadFromDisk);
   useEffect(() => {
     loadConnections();
-  }, [loadConnections]);
+    loadSettings();
+  }, [loadConnections, loadSettings]);
 
   const bootstrappedRef = useRef(false);
 
@@ -67,7 +71,9 @@ export function Layout() {
       <TitleBar
         sessionName={sessionLabel}
         isEditorVisible={isEditorVisible}
+        isSftpVisible={isSftpVisible}
         onToggleEditor={toggleEditor}
+        onToggleSftp={toggleSftp}
         onToggleLogs={() => setLogsOpen((v) => !v)}
         onToggleServers={() => setServersOpen((v) => !v)}
       />
@@ -122,6 +128,19 @@ export function Layout() {
                   sessionId={activeSessionId}
                   isVisible={isEditorVisible}
                 />
+              </div>
+            </div>
+
+            {/* SFTP file explorer drawer — only relevant for SSH sessions */}
+            <div
+              className={`overflow-hidden transition-all duration-300 ease-in-out ${
+                isSftpVisible
+                  ? 'w-[320px] border-l border-[var(--border)]'
+                  : 'w-0 border-l-0'
+              }`}
+            >
+              <div className="w-[320px] h-full flex flex-col">
+                <SftpPanel sessionId={activeConnectionId} />
               </div>
             </div>
           </div>

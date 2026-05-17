@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { useUiStore } from '@/stores/uiStore';
-import { nlToTasks } from '@/lib/aiService';
+import { nlToTasks, resolveProvider } from '@/lib/aiService';
 
 interface UseAiSubmitOptions {
   sessionId: string | null;
@@ -39,7 +39,8 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
       try {
         const config = useSettingsStore.getState().settings.ai;
 
-        if (!config.baseUrl) {
+        const provider = resolveProvider(config);
+        if (!provider.baseUrl) {
           throw new Error('Please configure AI API in Settings first');
         }
 

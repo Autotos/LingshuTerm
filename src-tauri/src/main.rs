@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use lingshu_term2_lib::{
+    ai_proxy,
     commands,
     connection::ConnectionManager,
     connection_commands,
@@ -9,6 +10,7 @@ use lingshu_term2_lib::{
     persistence,
     server_manager,
     session_commands,
+    sftp,
     shell::PtyManager,
     storage,
     utils,
@@ -32,12 +34,14 @@ fn main() {
         .manage(PtyManager::new())
         .manage(ConnectionManager::new())
         .manage(server_manager::ServerManager::new())
+        .manage(sftp::SftpManager::new())
         .invoke_handler(tauri::generate_handler![
             // Unified session creation (dispatches to PtyManager or ConnectionManager)
             session_commands::create_session,
             session_commands::list_local_shells,
             // PTY commands (write / resize / destroy / block)
             commands::write_to_terminal,
+            commands::get_terminal_cwd,
             commands::resize_terminal,
             commands::destroy_session,
             commands::execute_block_command,
@@ -56,6 +60,8 @@ fn main() {
             persistence::load_session,
             persistence::list_sessions,
             persistence::clear_session,
+            persistence::save_settings,
+            persistence::load_settings,
             persistence::save_session_export,
             persistence::load_sessions,
             persistence::save_sessions,
@@ -74,6 +80,20 @@ fn main() {
             // Connection storage (encrypted)
             storage::load_connections,
             storage::save_connections,
+            // SFTP file operations
+            sftp::sftp_home_dir,
+            sftp::sftp_list_dir,
+            sftp::sftp_read_file,
+            sftp::sftp_write_file,
+            sftp::sftp_upload_file,
+            sftp::sftp_download_file,
+            sftp::sftp_delete_item,
+            sftp::sftp_rename_item,
+            sftp::sftp_file_properties,
+            sftp::sftp_create_dir,
+            sftp::sftp_create_file,
+            // AI proxy (CORS bypass)
+            ai_proxy::ai_proxy_request,
         ])
         .setup(|app| {
             // 确保工作空间存在

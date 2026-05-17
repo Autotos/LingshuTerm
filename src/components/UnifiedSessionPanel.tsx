@@ -90,13 +90,8 @@ export function UnifiedSessionPanel({
   }, []);
 
   const handleConnectionReady = useCallback(() => {
-    // 1. Force fit NOW (synchronous) so the first output renders at the
-    //    correct dimensions — fixes the blank first-line issue.
     terminalRef.current?.fit();
-    // 2. Flush buffered keystrokes now that the PTY can accept input.
     terminalRef.current?.setConnectionReady();
-    // 3. Delayed focus — after the WebGL renderer has painted the first
-    //    frame.  setTimeout (not rAF) ensures the paint cycle is complete.
     setTimeout(() => {
       window.getSelection()?.removeAllRanges();
       terminalRef.current?.focus();

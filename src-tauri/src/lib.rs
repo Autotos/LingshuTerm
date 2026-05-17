@@ -1,3 +1,4 @@
+pub mod ai_proxy;
 pub mod block;
 pub mod commands;
 pub mod connection;
@@ -8,6 +9,7 @@ pub mod output_sanitizer;
 pub mod persistence;
 pub mod server_manager;
 pub mod session_commands;
+pub mod sftp;
 pub mod shell;
 pub mod storage;
 pub mod stream;
