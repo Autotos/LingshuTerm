@@ -1,7 +1,7 @@
 {
   "name": "lingshu-term",
   "private": true,
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "灵枢智能终端 3.0 - 跨平台智能 Agent 终端",
   "type": "module",
   "scripts": {
