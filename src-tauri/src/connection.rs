@@ -217,12 +217,30 @@ impl ConnectionManager {
                         match msg {
                             Some(russh::ChannelMsg::Data { data }) => {
                                 let bytes: &[u8] = &data;
+                                let len = bytes.len();
+                                
                                 if let Some(ref app) = app {
                                     // 3.0: single pipeline through UnifiedStreamCore
-                                    if let Ok(mut guard) = stream_cores.lock() {
-                                        if let Some(core) = guard.get_mut(&sid) {
-                                            core.process_chunk(bytes, &sid, app);
+                                    // Scope the lock so guard is dropped before sleep
+                                    {
+                                        if let Ok(mut guard) = stream_cores.lock() {
+                                            if let Some(core) = guard.get_mut(&sid) {
+                                                core.process_chunk(bytes, &sid, app);
+                                            }
                                         }
+                                        // guard dropped here
+                                    }
+                                    
+                                    // Now apply throttle AFTER releasing the lock
+                                    // This doesn't block rx.recv() in the select! loop
+                                    if len >= 2048 {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;
+                                    } else if len >= 512 {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(4)).await;
+                                    } else if len >= 128 {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+                                    } else {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
                                     }
                                 }
                             }
@@ -311,6 +329,17 @@ impl ConnectionManager {
                             if let Some(ref app) = app {
                                 event::output(&sid, String::from_utf8_lossy(&clean_data)).emit(app);
                             }
+                        }
+                        
+                        // Smart throttle: aggressively limit high-frequency small chunks
+                        if n >= 2048 {
+                            std::thread::sleep(std::time::Duration::from_millis(8));
+                        } else if n >= 512 {
+                            std::thread::sleep(std::time::Duration::from_millis(4));
+                        } else if n >= 128 {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut

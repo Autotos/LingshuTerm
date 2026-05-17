@@ -36,16 +36,50 @@ export function UnifiedSessionPanel({
 }: UnifiedSessionPanelProps) {
   const terminalRef = useRef<TerminalRendererHandle | null>(null);
 
+  // Batched LoggerService writer — avoids filesystem I/O on every chunk.
+  const logBufferRef = useRef<string[]>([]);
+  const logBufferBytesRef = useRef(0);  // Incremental byte count — avoids O(n) reduce
+  const logTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const LOG_FLUSH_MS = 500;
+  const LOG_MAX_BYTES = 64 * 1024;
+
+  const flushLogBuffer = useCallback((sid: string) => {
+    if (logBufferRef.current.length === 0) return;
+    const meta = useSessionStore.getState().resolveTerminalMeta(sid);
+    if (meta?.isLogging) {
+      const { logging } = useSettingsStore.getState().settings;
+      LoggerService.write(logging, meta.sessionName, meta.terminalName, logBufferRef.current.join(''));
+    }
+    logBufferRef.current = [];
+    logBufferBytesRef.current = 0;  // Reset counter
+  }, []);
+
+  // Flush on unmount
+  useEffect(() => {
+    return () => {
+      if (logTimerRef.current) clearTimeout(logTimerRef.current);
+      if (sessionId) flushLogBuffer(sessionId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
   const handleTerminalOutput = useCallback((data: string) => {
     terminalRef.current?.write(data);
     if (sessionId && data) {
-      const meta = useSessionStore.getState().resolveTerminalMeta(sessionId);
-      if (meta?.isLogging) {
-        const { logging } = useSettingsStore.getState().settings;
-        LoggerService.write(logging, meta.sessionName, meta.terminalName, data);
+      logBufferRef.current.push(data);
+      logBufferBytesRef.current += data.length;  // O(1) — no reduce!
+      
+      if (logBufferBytesRef.current >= LOG_MAX_BYTES) {
+        if (logTimerRef.current) { clearTimeout(logTimerRef.current); logTimerRef.current = null; }
+        flushLogBuffer(sessionId);
+      } else if (!logTimerRef.current) {
+        logTimerRef.current = setTimeout(() => {
+          logTimerRef.current = null;
+          flushLogBuffer(sessionId);
+        }, LOG_FLUSH_MS);
       }
     }
-  }, [sessionId]);
+  }, [sessionId, flushLogBuffer]);
 
   const handleCommandStart = useCallback((command: string) => {
     writeCommandHeader(terminalRef.current, command);

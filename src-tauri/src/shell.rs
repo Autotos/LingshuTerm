@@ -178,6 +178,19 @@ impl PtyManager {
         })?;
         info!("Resized session {} to {}x{}", session_id, cols, rows);
 
+        // Windows native shells (cmd, PowerShell) receive the ConPTY
+        // WINDOW_BUFFER_SIZE_EVENT natively — no stty hack needed.
+        // Unix shells on Windows (bash, zsh via Git Bash / MSYS2 / WSL)
+        // need explicit notification because ConPTY resize does not
+        // reliably forward to the child process in those environments.
+        let shell_lower = session.shell.to_lowercase();
+        if shell_lower.contains("cmd.exe")
+            || shell_lower.contains("powershell.exe")
+            || shell_lower.contains("pwsh.exe")
+        {
+            return Ok(());
+        }
+
         // Atomically write both phases — hold the writer lock so user
         // keystrokes queue up and are only written after echo is restored.
         let mut writer = session
@@ -278,6 +291,21 @@ impl PtyManager {
                         if let Some(core) = cores.get_mut(&session_id) {
                             core.process_chunk(chunk, &session_id, &app);
                         }
+                    }
+                    
+                    // Smart throttle: aggressively limit high-frequency small chunks.
+                    // < 128B: 1ms sleep (Ctrl+C ~3B gets 1ms delay, still responsive)
+                    // 128B-512B: 2ms sleep (prompts, small responses)
+                    // 512B-2KB: 4ms sleep (moderate output)
+                    // >= 2KB: 8ms sleep (heavy output like du -h)
+                    if n >= 2048 {
+                        std::thread::sleep(std::time::Duration::from_millis(8));
+                    } else if n >= 512 {
+                        std::thread::sleep(std::time::Duration::from_millis(4));
+                    } else if n >= 128 {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
                 Err(e) => {

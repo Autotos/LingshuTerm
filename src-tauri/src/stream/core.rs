@@ -54,6 +54,46 @@ impl UnifiedStreamCore {
         app: &AppHandle,
     ) {
         self.chunk_count = self.chunk_count.wrapping_add(1);
+        self.emit_events(chunk, session_id, app);
+    }
+
+    /// Process a raw byte chunk with throttling (for SSH async loops).
+    ///
+    /// The throttle is applied AFTER emitting events, using tokio::sleep.
+    /// This is called from SSH's tokio::select! loop to avoid blocking
+    /// user input (rx.recv()) while still rate-limiting frontend events.
+    pub async fn process_chunk_throttled(
+        &mut self,
+        chunk: &[u8],
+        session_id: &str,
+        app: &AppHandle,
+    ) {
+        self.chunk_count = self.chunk_count.wrapping_add(1);
+        self.emit_events(chunk, session_id, app);
+
+        // Apply throttle AFTER emitting — this sleeps the async task,
+        // NOT the select! loop. User input (rx.recv()) is handled by
+        // a different branch in the select!, so it's NOT blocked.
+        let len = chunk.len();
+        if len >= 2048 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;
+        } else if len >= 512 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(4)).await;
+        } else if len >= 128 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Common event emission logic (shared by process_chunk and process_chunk_throttled).
+    fn emit_events(
+        &mut self,
+        chunk: &[u8],
+        session_id: &str,
+        app: &AppHandle,
+    ) {
+        self.chunk_count = self.chunk_count.wrapping_add(1);
 
         // ── Stage 1: OSC 7701 Marker Scanner ──────────────────────
         //

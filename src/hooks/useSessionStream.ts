@@ -2,6 +2,59 @@ import { useEffect, useRef } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSessionLogStore } from '@/stores/sessionLogStore';
 
+// ─── Batched log store writes ────────────────────────────────────
+// Calling appendLog on every output chunk costs ~46ms per call when
+// the event array is large (array copies).  Instead, batch output
+// events and flush at most once per second.
+//
+// Optimisation (May 2026):
+//  - Track totalChars incrementally (no O(n) .reduce() on every push).
+//  - During burst, merge consecutive output chunks into fewer events
+//    to reduce the number of appendLog calls.
+
+interface LogBatchEntry {
+  chunks: string[];
+  totalChars: number;
+}
+
+const logBatch: Map<string, LogBatchEntry> = new Map();
+let logBatchTimer: ReturnType<typeof setTimeout> | null = null;
+const LOG_BATCH_FLUSH_MS = 1000;
+const LOG_BATCH_MAX_CHARS = 32 * 1024; // 32 KB
+
+function flushLogBatch() {
+  logBatchTimer = null;
+  const { appendLog } = useSessionLogStore.getState();
+  for (const [sid, entry] of logBatch) {
+    if (entry.chunks.length > 0) {
+      const merged = entry.chunks.join('');
+      appendLog(sid, 'output', { data: merged });
+    }
+  }
+  logBatch.clear();
+}
+
+function appendLogBatched(sessionId: string, data: string) {
+  let entry = logBatch.get(sessionId);
+  if (!entry) {
+    entry = { chunks: [], totalChars: 0 };
+    logBatch.set(sessionId, entry);
+  }
+  entry.chunks.push(data);
+  entry.totalChars += data.length;
+
+  // Flush if batch is large enough
+  if (entry.totalChars >= LOG_BATCH_MAX_CHARS) {
+    if (logBatchTimer) { clearTimeout(logBatchTimer); logBatchTimer = null; }
+    flushLogBatch();
+    return;
+  }
+
+  if (!logBatchTimer) {
+    logBatchTimer = setTimeout(flushLogBatch, LOG_BATCH_FLUSH_MS);
+  }
+}
+
 /**
  * Tagged-union payload from the Rust `SessionEvent` enum.
  * Mirrors `src-tauri/src/stream/event.rs`.
@@ -87,7 +140,8 @@ export function useSessionStream({
                 cbs.onConnectionReady?.();
               }
               cbs.onTerminalOutput?.(p.data);
-              appendLog(sessionIdRef.current!, 'output', { data: p.data });
+              // Batched — avoids 46ms Zustand array copy on every chunk
+              appendLogBatched(sessionIdRef.current!, p.data);
             }
             break;
 

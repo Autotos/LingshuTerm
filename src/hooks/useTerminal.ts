@@ -2,17 +2,28 @@ import { useEffect, useRef, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import type { PtyOutputPayload, SessionErrorPayload } from '@/models/terminal';
 import { getWriteCommand, getResizeCommand } from '@/lib/sessionUtils';
 import { persistTerminalChunk } from '@/lib/persistenceSubscribe';
 import { useSettingsStore } from '@/stores/settingsStore';
 import '@xterm/xterm/css/xterm.css';
 
-// --- Diagnostic counter (Bug 1 investigation) ----------------------------
-// StrictMode 下每个 Hook 实例分配递增 id，便于区分 mount-1 / mount-2 泄漏源。
-const __useTerminalHookCounter = { n: 0 };
+// ─── Emergency recovery key (global) ──────────────────────────────
+// Ctrl+Alt+Shift+R = force-clear all terminal log stores to free memory.
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.ctrlKey && e.altKey && e.shiftKey && e.key === 'R') {
+      e.preventDefault();
+      void import('@/stores/sessionLogStore').then(({ useSessionLogStore }) => {
+        const state = useSessionLogStore.getState();
+        for (const sid of Object.keys(state.logs)) {
+          state.clearSessionLogs(sid);
+        }
+      }).catch(() => {});
+    }
+  });
+}
 
 interface UseTerminalOptions {
   containerRef: React.RefObject<HTMLDivElement | null>;
@@ -23,19 +34,10 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
-  // 诊断用：本 Hook 实例 ID（模块级计数器分配）
-  const instanceIdRef = useRef<number>(0);
-  if (instanceIdRef.current === 0) {
-    instanceIdRef.current = ++__useTerminalHookCounter.n;
-  }
 
   // Input buffering: hold keystrokes until setConnectionReady() is called
   const connectionReadyRef = useRef(false);
   const inputBufferRef = useRef<string[]>([]);
-
-  // Track current sessionId for use in effects that only run once
-  const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
 
   // Live-updating settings ref (avoids recreating effects on every setting change)
   const terminalSettingsRef = useRef(useSettingsStore.getState().settings.terminal);
@@ -69,12 +71,9 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
 
     const container = containerRef.current;
 
-    // Estimate initial cols/rows from the container so the terminal
-    // never starts at the xterm.js default of 80×24.  FitAddon will
-    // fine-tune these to exact dimensions when the renderer is ready.
     const fontSize = 13;
-    const estCharW = fontSize * 0.6; // ~7.8 px for typical monospace
-    const estCharH = fontSize * 1.5; // ~19.5 px
+    const estCharW = fontSize * 0.6;
+    const estCharH = fontSize * 1.5;
     const estCols =
       container.clientWidth > 0
         ? Math.max(80, Math.min(500, Math.floor((container.clientWidth - 8) / estCharW)))
@@ -116,43 +115,32 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
         brightCyan: '#a6c9c9',
         brightWhite: '#faf9f6',
       },
-      scrollback: 10000,
+      scrollback: 500,
+      fastScrollModifier: 'alt',
+      fastScrollSensitivity: 5,
+      smoothScrollDuration: 0,
       convertEol: true,
     });
 
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
 
-    // 1) open → Canvas renderer active
     terminal.open(container);
 
-    // 2) Load WebglAddon NOW — before any fit or refresh.
-    //    A Canvas fit/refresh before WebGL can schedule async viewport
-    //    sync that fires after WebGL replaces the renderer, causing
-    //    "Cannot read properties of undefined (reading 'dimensions')".
-    //    The estimated cols/rows from the constructor keep the terminal
-    //    visually wide while WebGL initialises.
     let webglAddon: WebglAddon | null = null;
     try {
       webglAddon = new WebglAddon();
       terminal.loadAddon(webglAddon);
       webglAddonRef.current = webglAddon;
     } catch (e) {
-      console.warn('WebGL not available, falling back to canvas rendering', e);
+      console.warn('[Terminal] WebGL not available, falling back to canvas rendering', e);
       webglAddon = null;
     }
-
-    // 3) Terminal ready.  The data-events effect owns the initial
-    //    fit (with WebGL-dimension retry) + backend notification.
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
     return () => {
-      // Dispose terminal FIRST (it disposes addons internally),
-      // then clean up WebGL.  Reversing the order causes
-      // "Cannot read properties of undefined (reading 'dimensions')"
-      // because the renderer is gone before the terminal is stopped.
       try {
         terminal.dispose();
       } catch {
@@ -169,86 +157,13 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     };
   }, [containerRef]);
 
-  // Setup Tauri event listeners
-  //
-  // 修复 Bug 1（字符/输出双写）：
-  // 旧实现用共享的 `listenersRef.current` + `async setupListeners`，在
-  // React StrictMode 双挂载下存在时序竞态 —— 两份 pending `listen()` 会先后
-  // 把各自的 unlisten 函数 push 进同一个数组，导致两个 pty-output 监听器并存，
-  // 每条输出被 `terminal.write()` 两次。
-  //
-  // 新实现：
-  //   1) 改用本 Effect 闭包内的 `cancelled` flag + 局部 `localUnlisteners`，
-  //      与其它 Effect run 完全隔离；
-  //   2) 每个 listener 回调入口先 `if (cancelled) return`，即使 unlisten()
-  //      未来得及执行也不会产生副作用；
-  //   3) 若 await 期间已 cancelled，立即 unlisten 新返回的句柄，防止泄漏。
+  // Reset connection state when sessionId changes
   useEffect(() => {
-    if (!terminalRef.current) return;
-
-    // Reset connection state for the new PTY
     connectionReadyRef.current = false;
     inputBufferRef.current = [];
-
-    let cancelled = false;
-    const localUnlisteners: UnlistenFn[] = [];
-
-    (async () => {
-      const unlistenOutput = await listen<PtyOutputPayload>(
-        'pty-output',
-        (event) => {
-          if (cancelled) return;
-          if (
-            terminalRef.current &&
-            event.payload.session_id === sessionId
-          ) {
-            terminalRef.current.write(event.payload.data);
-            persistTerminalChunk(sessionId, 'stdout', event.payload.data);
-          }
-        },
-      );
-      if (cancelled) {
-        try { unlistenOutput(); } catch { /* Tauri may already have cleaned up */ }
-        return;
-      }
-      localUnlisteners.push(unlistenOutput);
-
-      const unlistenError = await listen<SessionErrorPayload>(
-        'session-error',
-        (event) => {
-          if (cancelled) return;
-          if (
-            terminalRef.current &&
-            event.payload.session_id === sessionId
-          ) {
-            terminalRef.current.writeln(
-              `\r\n[Error: ${event.payload.error}]`,
-            );
-            persistTerminalChunk(sessionId, 'stderr', event.payload.error);
-          }
-        },
-      );
-      if (cancelled) {
-        try { unlistenError(); } catch { /* Tauri may already have cleaned up */ }
-        return;
-      }
-      localUnlisteners.push(unlistenError);
-    })();
-
-    return () => {
-      cancelled = true;
-      for (const unlisten of localUnlisteners) {
-        try { unlisten(); } catch { /* Tauri may already have cleaned up */ }
-      }
-      localUnlisteners.length = 0;
-    };
   }, [sessionId]);
 
   // Setup terminal data events (user input → PTY) + resize + initial sizing.
-  //
-  // The initial fit/resize lives HERE — inside the same effect that registers
-  // terminal.onResize.  This guarantees the resize signal ALWAYS reaches the
-  // backend PTY, regardless of React effect ordering or mount timing.
   useEffect(() => {
     if (!terminalRef.current || !sessionId) return;
 
@@ -270,8 +185,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       }
     });
 
-    // Debounced resize.  The Rust backend handles PTY resize + atomic
-    // two-phase stty write (self-cleaning ANSI, zero visible output).
     let resizeSeq = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -286,14 +199,7 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       }, 150);
     });
 
-    // ── Initial sizing ──────────────────────────────────────────
-    // Runs AFTER onResize is registered (same effect), so
-    // terminal.resize() → onResize → invoke reaches PTY.
-    //
-    // WebGL renderer cell dimensions may not be ready until a few
-    // frames after terminal.loadAddon(WebglAddon).  If fitAddon.fit()
-    // returns without changing cols the cell dims are probably still
-    // 0 → wait 100ms and retry (up to 5 times).
+    // Initial sizing
     const fa = fitAddonRef.current;
     const el = containerRef.current;
     if (fa && el) {
@@ -309,9 +215,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
           } else {
             terminal.resize(defaultColumns, defaultRows);
           }
-          // If fit() didn't change dimensions AND we're still
-          // stuck at narrow cols (Canvas fit didn't run), WebGL
-          // cell metrics probably aren't ready yet. Retry.
           if (
             autoFit &&
             terminal.cols === prevCols &&
@@ -324,8 +227,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
             return;
           }
           terminal.refresh(0, terminal.rows - 1);
-          // Backend resize is handled by the onResize handler above
-          // (fires from fa.fit() / terminal.resize() → debounced → Rust).
         } else if (attempts < 60) {
           attempts++;
           setTimeout(tryFit, 50);
@@ -342,7 +243,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
   }, [sessionId]);
 
   // ResizeObserver — container resize → auto-fit (when enabled)
-  // Handles: window resize, sidebar collapse/expand, view switching (hidden → visible)
   useEffect(() => {
     const el = containerRef.current;
     if (!el || !fitAddonRef.current) return;
@@ -361,7 +261,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
           if (!fa || !t) return;
           const prevCols = t.cols;
           fa.fit();
-          // If cols didn't change (WebGL dims not ready), retry once
           if (t.cols === 80 && t.cols === prevCols && roRetries < 3) {
             roRetries++;
             setTimeout(() => {
@@ -385,7 +284,7 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     };
   }, [containerRef]);
 
-  // React to settings changes: when autoFit or columns/rows change, reapply sizing.
+  // React to settings changes
   useEffect(() => {
     const unsub = useSettingsStore.subscribe((state, prev) => {
       const next = state.settings.terminal;
@@ -400,10 +299,8 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
       if (!terminal) return;
 
       if (next.autoFit) {
-        // Switched to auto-fit: fit to container now
         fitAddonRef.current?.fit();
       } else {
-        // Switched to fixed size, or columns/rows changed while autoFit is off
         terminal.resize(next.defaultColumns, next.defaultRows);
       }
     });
@@ -411,7 +308,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
   }, []);
 
   const createSession = useCallback(async (shell?: string, cwd?: string) => {
-    // Routes through the unified `create_session(config)` entry point.
     const newSessionId: string = await invoke('create_session', {
       config: {
         protocol: 'local',
@@ -436,8 +332,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
 
   return {
     terminal: terminalRef.current,
-    /** The internal ref — always has the live Terminal after init, unlike
-     *  `terminal` which is frozen to the first render's null value. */
     terminalRef,
     createSession,
     fit,
