@@ -56,6 +56,15 @@ export interface TerminalRendererHandle {
   fit: () => void;
   setConnectionReady: () => void;
   focus: () => void;
+  getCols: () => number;
+  /** Register a visual separator line at the current cursor position. */
+  registerSeparator: () => void;
+  /** Get the current absolute buffer line number (for tracking task blocks). */
+  getCurrentLine: () => number;
+  /** Register a decoration at the given buffer line. Returns decoration ID. */
+  registerLineDecoration: (lineNum: number, height: number, color: string) => number | undefined;
+  /** Dispose a decoration by ID. */
+  disposeDecoration: (id: number) => void;
 }
 
 interface TerminalRendererProps {
@@ -351,6 +360,10 @@ export const TerminalRenderer = forwardRef<TerminalRendererHandle, TerminalRende
       terminalRef.current?.focus();
     }, []);
 
+    // Track registered decorations for disposal
+    const decosRef = useRef<Map<number, import('@xterm/xterm').IDecoration>>(new Map());
+    let decoSeq = 0;
+
     useImperativeHandle(
       ref,
       () => ({
@@ -362,6 +375,53 @@ export const TerminalRenderer = forwardRef<TerminalRendererHandle, TerminalRende
         fit: () => fit(),
         setConnectionReady: () => setConnectionReady(),
         focus: () => focus(),
+        getCols: () => terminalRef.current?.cols ?? 80,
+        getCurrentLine: () => {
+          const t = terminalRef.current;
+          if (!t) return 0;
+          return t.buffer.active.baseY + t.buffer.active.cursorY;
+        },
+        registerSeparator: () => {
+          const t = terminalRef.current;
+          if (!t) return;
+          t.write('\r\n');
+          const marker = t.registerMarker(0);
+          if (marker) {
+            t.registerDecoration({
+              marker,
+              layer: 'top',
+              backgroundColor: 'rgba(100,100,100,0.50)',
+              height: 0.12,
+              width: t.cols,
+              x: 0,
+            });
+          }
+          t.write('\r\n');
+        },
+        registerLineDecoration: (lineNum: number, height: number, color: string) => {
+          const t = terminalRef.current;
+          if (!t) return undefined;
+          const marker = t.registerMarker(lineNum - t.buffer.active.baseY);
+          if (!marker) return undefined;
+          const deco = t.registerDecoration({
+            marker,
+            layer: 'top',
+            backgroundColor: color,
+            height,
+            width: t.cols,
+            x: 0,
+          });
+          if (deco) {
+            decoSeq++;
+            decosRef.current.set(decoSeq, deco);
+            return decoSeq;
+          }
+          return undefined;
+        },
+        disposeDecoration: (id: number) => {
+          decosRef.current.get(id)?.dispose();
+          decosRef.current.delete(id);
+        },
       }),
       [clear, getSelection, fit, setConnectionReady, focus],
     );

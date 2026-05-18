@@ -62,6 +62,8 @@ fn main() {
             persistence::clear_session,
             persistence::save_settings,
             persistence::load_settings,
+            persistence::read_memory_file,
+            persistence::write_memory_file,
             persistence::save_session_export,
             persistence::load_sessions,
             persistence::save_sessions,

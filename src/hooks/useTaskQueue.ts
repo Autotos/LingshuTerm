@@ -2,7 +2,6 @@ import { useEffect, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTaskStore, getNextPendingTask, hasRunningTask } from '@/stores/taskStore';
-import type { BlockCmdStartedPayload, BlockCmdCompletedPayload } from '@/models/block';
 
 interface UseTaskQueueOptions {
   sessionId: string | null;
@@ -10,9 +9,8 @@ interface UseTaskQueueOptions {
 
 /**
  * Task queue execution engine.
- * Sequentially executes pending tasks in active groups.
- * Auto-pauses on failure, supports retry/skip.
- * Mount at Layout level.
+ * Sequentially executes pending tasks from active groups.
+ * Listens to the 3.0 unified `session-event` channel for command-start/command-end.
  */
 export function useTaskQueue({ sessionId }: UseTaskQueueOptions) {
   const processingRef = useRef(false);
@@ -24,16 +22,14 @@ export function useTaskQueue({ sessionId }: UseTaskQueueOptions) {
 
     const { groups, setTaskStatus, setTaskError } = useTaskStore.getState();
 
-    // Find the first non-paused group that has pending tasks and no running tasks
     for (const group of groups) {
       if (group.sessionId !== sessionId) continue;
       if (group.paused) continue;
-      if (hasRunningTask(group)) return; // Wait for current task
+      if (hasRunningTask(group)) return;
 
       const next = getNextPendingTask(group);
       if (!next) continue;
 
-      // Execute this task
       processingRef.current = true;
       setTaskStatus(group.id, next.id, 'running');
 
@@ -53,59 +49,58 @@ export function useTaskQueue({ sessionId }: UseTaskQueueOptions) {
     }
   }, [sessionId]);
 
-  // Listen to PTY events to track task completion
+  // Listen to 3.0 unified session-event for command completion
   useEffect(() => {
     if (!sessionId) return;
 
     const unlisteners: UnlistenFn[] = [];
 
     const setup = async () => {
-      // block-cmd-started: confirm task started (already set to running)
+      // command-start: confirms task is running
       unlisteners.push(
-        await listen<BlockCmdStartedPayload>('block-cmd-started', (_event) => {
-          // Task already marked running in processNext
-        }),
+        await listen<{ type: string; session_id: string; command_id: string; command?: string }>(
+          'session-event',
+          (event) => {
+            if (event.payload.session_id !== sessionId) return;
+            if (event.payload.type !== 'command-start') return;
+            // Task already marked running in processNext; output will arrive
+          },
+        ),
       );
 
-      // block-cmd-completed: mark task done, trigger next
+      // command-end: task completed → trigger next
       unlisteners.push(
-        await listen<BlockCmdCompletedPayload>('block-cmd-completed', (event) => {
-          const { command_id, exit_code } = event.payload;
-          const current = currentTaskRef.current;
-          if (current && current.commandId === command_id) {
-            useTaskStore.getState().completeTask(current.groupId, current.taskId, exit_code);
-            currentTaskRef.current = null;
-            // Trigger next task after a short delay
-            setTimeout(processNext, 100);
-          }
-        }),
-      );
+        await listen<{ type: string; session_id: string; command_id: string; exit_code?: number }>(
+          'session-event',
+          (event) => {
+            if (event.payload.session_id !== sessionId) return;
+            if (event.payload.type !== 'command-end') return;
 
-      // block-output: StreamCleaner-sanitized stream for task output
-      unlisteners.push(
-        await listen<{ session_id: string; data: string }>('block-output', (event) => {
-          const { session_id, data } = event.payload;
-          if (session_id !== sessionId) return;
-
-          const current = currentTaskRef.current;
-          if (current) {
-            useTaskStore.getState().appendTaskOutput(current.groupId, current.taskId, data);
-          }
-        }),
+            const current = currentTaskRef.current;
+            if (current && current.commandId === event.payload.command_id) {
+              useTaskStore.getState().completeTask(
+                current.groupId,
+                current.taskId,
+                event.payload.exit_code ?? 0,
+              );
+              currentTaskRef.current = null;
+              setTimeout(processNext, 150);
+            }
+          },
+        ),
       );
     };
 
     setup();
 
     return () => {
-      unlisteners.forEach((fn) => fn());
+      unlisteners.forEach((fn) => { try { fn(); } catch { /* ignore */ } });
     };
   }, [sessionId, processNext]);
 
-  // Watch for store changes that should trigger queue processing
+  // Store subscription: fire processNext when new groups/tasks are added
   useEffect(() => {
     const unsub = useTaskStore.subscribe(() => {
-      // Check if we should process next task
       if (!processingRef.current && !currentTaskRef.current) {
         processNext();
       }
@@ -113,7 +108,6 @@ export function useTaskQueue({ sessionId }: UseTaskQueueOptions) {
     return unsub;
   }, [processNext]);
 
-  // Manual trigger for retry/resume
   const triggerProcess = useCallback(() => {
     processNext();
   }, [processNext]);

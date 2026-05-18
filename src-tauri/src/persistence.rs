@@ -43,14 +43,17 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
             session_id.len()
         ));
     }
-    // 白名单：字母/数字/下划线/短横/小数点
-    if !session_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    // 白名单：字母/数字/下划线/短横/小数点/CJK/常见 Unicode 字符
+    // 拒绝路径分隔符和危险字符
+    if session_id.contains('/') || session_id.contains('\\')
+        || session_id.contains('\0') || session_id.contains('<')
+        || session_id.contains('>') || session_id.contains(':')
+        || session_id.contains('"') || session_id.contains('|')
+        || session_id.contains('?') || session_id.contains('*')
     {
-        return Err(format!("invalid session_id: {}", session_id));
+        return Err(format!("invalid session_id: contains forbidden character — {}", session_id));
     }
-    // 防御 ".." 与 "."（虽然前面校验已覆盖，但再兜一层语义）
+    // 防御保留名
     if session_id == "." || session_id == ".." {
         return Err("invalid session_id: reserved name".to_string());
     }
@@ -529,4 +532,63 @@ pub async fn load_settings() -> Result<Option<String>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("Failed to read settings: {}", e)),
     }
+}
+
+// ── Session memory files ────────────────────────────────────────
+
+#[tauri::command]
+pub async fn read_memory_file(
+    app: AppHandle,
+    session_id: String,
+    filename: String,
+) -> Result<Option<String>, String> {
+    // Only allow specific filenames
+    let allowed = ["memory_short.json", "memory_long.json", "AGENT.md", "tasks.json"];
+    if !allowed.contains(&filename.as_str()) {
+        return Err(format!("Invalid memory filename: {}", filename));
+    }
+
+    let dir = session_dir(&app, &session_id)?;
+    ensure_dir(&dir).await?;
+    let path = dir.join(&filename);
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Failed to read {}: {}", filename, e)),
+    }
+}
+
+#[tauri::command]
+pub async fn write_memory_file(
+    app: AppHandle,
+    session_id: String,
+    filename: String,
+    content: String,
+) -> Result<(), String> {
+    let allowed = ["memory_short.json", "memory_long.json", "AGENT.md", "tasks.json"];
+    if !allowed.contains(&filename.as_str()) {
+        return Err(format!("Invalid memory filename: {}", filename));
+    }
+
+    let dir = session_dir(&app, &session_id)?;
+    ensure_dir(&dir).await?;
+    let path = dir.join(&filename);
+    let tmp = dir.join(format!("{}.tmp", filename));
+
+    let mut f = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| format!("Failed to create {}: {}", filename, e))?;
+    f.write_all(content.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write {}: {}", filename, e))?;
+    f.flush()
+        .await
+        .map_err(|e| format!("Failed to flush {}: {}", filename, e))?;
+
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| format!("Failed to rename {}: {}", filename, e))?;
+
+    Ok(())
 }

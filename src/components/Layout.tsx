@@ -6,6 +6,7 @@ import { SftpPanel } from './SftpPanel';
 import { TerminalTabBar } from './TerminalTabBar';
 import { UnifiedSessionPanel } from './UnifiedSessionPanel';
 import { BottomInputArea } from './BottomInputArea';
+import { OutputPanel } from './OutputPanel';
 import { SettingsModal } from './SettingsModal';
 import { SessionTypeModal } from './SessionTypeModal';
 import { TerminalConnectModal } from './TerminalConnectModal';
@@ -144,6 +145,9 @@ export function Layout() {
               </div>
             </div>
           </div>
+
+          {/* Output panel */}
+          <OutputPanel />
 
           {/* Bottom input bar */}
           <BottomInputArea

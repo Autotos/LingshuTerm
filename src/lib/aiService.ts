@@ -79,7 +79,7 @@ export interface AiTaskStep {
   command: string;
 }
 
-interface ChatMessage {
+export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
 }
@@ -151,31 +151,83 @@ export async function nlToTasks(
   config: AiConfig,
   query: string,
   signal?: AbortSignal,
+  /** Pre-assembled messages (from memory system). If provided, skips default system prompt. */
+  preMessages?: ChatMessage[],
 ): Promise<AiTaskStep[]> {
   const provider = resolveProvider(config);
-  const raw = await chatCompletion(
-    provider,
-    [
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: query },
-    ],
-    signal,
-  );
+  const messages: ChatMessage[] = preMessages && preMessages.length > 0
+    ? preMessages
+    : [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: query },
+      ];
+  const raw = await chatCompletion(provider, messages, signal);
 
+  // ── Try JSON array first (expected format) ──
   const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    throw new Error(`AI response is not a valid JSON array: ${raw.slice(0, 100)}`);
+  if (jsonMatch) {
+    try {
+      const parsed: unknown = JSON.parse(jsonMatch[0]);
+      if (Array.isArray(parsed)) {
+        const steps = parsed.map((item: { description?: string; command?: string }) => ({
+          description: String(item.description ?? ''),
+          command: String(item.command ?? ''),
+        })).filter((step) => step.command.length > 0);
+        if (steps.length > 0) return steps;
+      }
+    } catch { /* fall through to code-block extraction */ }
   }
 
-  const parsed: unknown = JSON.parse(jsonMatch[0]);
-  if (!Array.isArray(parsed)) {
-    throw new Error('AI response is not an array');
+  // ── Fallback: extract commands from code blocks ──
+  const codeBlockRe = /```(?:bash|sh|shell|zsh|cmd|powershell|ps1)?\s*\n([\s\S]*?)```/g;
+  const codeCommands: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = codeBlockRe.exec(raw)) !== null) {
+    for (const line of m[1].split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('//')) {
+        codeCommands.push(trimmed);
+      }
+    }
+  }
+  if (codeCommands.length > 0) {
+    return codeCommands.map((cmd, i) => ({
+      description: `Step ${i + 1}`,
+      command: cmd,
+    }));
   }
 
-  return parsed.map((item: { description?: string; command?: string }) => ({
-    description: String(item.description ?? ''),
-    command: String(item.command ?? ''),
-  })).filter((step) => step.command.length > 0);
+  // ── Fallback: extract lines prefixed with $ or > ──
+  const promptRe = /^[\s]*[$>]\s+(.+)$/gm;
+  const promptCommands: string[] = [];
+  while ((m = promptRe.exec(raw)) !== null) {
+    const cmd = m[1].trim();
+    if (cmd && !cmd.startsWith('#') && !cmd.startsWith('//')) {
+      promptCommands.push(cmd);
+    }
+  }
+  if (promptCommands.length > 0) {
+    return promptCommands.map((cmd, i) => ({
+      description: `Step ${i + 1}`,
+      command: cmd,
+    }));
+  }
+
+  // ── Last resort: treat every non-empty, non-comment line as a command ──
+  const lines = raw.split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && !l.startsWith('//') && !l.startsWith('```'));
+  const shellLike = lines.filter((l) =>
+    /^[a-zA-Z0-9_][a-zA-Z0-9_.-]*\s/.test(l) || /^(\.\/|\/|[a-zA-Z]:\\)/.test(l),
+  );
+  if (shellLike.length > 0) {
+    return shellLike.map((cmd, i) => ({
+      description: `Step ${i + 1}`,
+      command: cmd,
+    }));
+  }
+
+  throw new Error(`AI response contains no executable commands: ${raw.slice(0, 200)}`);
 }
 
 export async function testConnection(config: AiConfig): Promise<string> {
