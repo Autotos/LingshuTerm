@@ -27,7 +27,8 @@ export interface Task {
 
   /** Realtime monitor config */
   monitor?: {
-    targetSessionId: string;
+    /** Target session connectionIds (empty = all sessions) */
+    targetSessionIds: string[];
     triggerKeywords: string[];
     /** 'once' = fire once per keyword, 'count' = up to N times, 'every' = every match */
     triggerMode: 'once' | 'count' | 'every';

@@ -14,13 +14,10 @@ interface UseTaskMonitorOptions {
 export function useTaskMonitor({ sessionId, outputChunks, tick }: UseTaskMonitorOptions) {
   const bufferRef = useRef('');
   const lastLenRef = useRef(0);
-  // taskId → { keyword → fireCount }
   const countsRef = useRef<Map<string, Map<string, number>>>(new Map());
 
-  // Resolve UI session name from terminal connectionId
   const uiSessionName = useResolveSessionName(sessionId);
 
-  // Get realtime tasks for this session
   const allTasks = useManualTaskStore((s) => s.tasks);
   const realtimeTasks = allTasks.filter(
     (t) =>
@@ -30,12 +27,22 @@ export function useTaskMonitor({ sessionId, outputChunks, tick }: UseTaskMonitor
       t.sessionId === uiSessionName,
   );
 
-  // Reset counts when tasks change
+  console.log(
+    `[TaskMonitor] render sessionId="${sessionId}" uiSession="${uiSessionName}" allTasks=${allTasks.length} realtime=${realtimeTasks.length}`,
+  );
+
+  // When tasks or session change: reset state and force re-scan of accumulated buffer
   useEffect(() => {
     countsRef.current.clear();
     for (const t of realtimeTasks) {
       countsRef.current.set(t.id, new Map());
     }
+    // Reset buffer position so the next effect run re-scans everything
+    lastLenRef.current = 0;
+    console.log(
+      `[TaskMonitor] activated — session="${uiSessionName}" realtime=${realtimeTasks.length} buffer=${bufferRef.current.length}B`,
+      realtimeTasks.map((t) => ({ name: t.name, keywords: t.monitor?.triggerKeywords })),
+    );
   }, [uiSessionName, allTasks]);
 
   // Process new output chunks
@@ -78,32 +85,60 @@ export function useTaskMonitor({ sessionId, outputChunks, tick }: UseTaskMonitor
 
         if (!found) continue;
 
-        const cmd = task.action.useAI
+        let rawCmd = task.action.useAI
           ? (task.action.prompt ?? '')
           : (task.action.command ?? '');
-        if (!cmd) continue;
+        if (!rawCmd) continue;
 
-        const target = task.monitor?.targetSessionId ?? sessionId;
-        if (!target) continue;
+        // Resolve target sessions: empty array = all active sessions
+        let ids = task.monitor?.targetSessionIds ?? [];
+        const allSessions = useSessionStore.getState().sessions;
+        // Build map: terminal UUID → connectionId
+        const terminalMap = new Map<string, string>();
+        for (const [, s] of allSessions) {
+          for (const t of s.terminals) {
+            if (t.connectionId) terminalMap.set(t.id, t.connectionId);
+          }
+        }
+
+        // Resolve stored terminal UUIDs to current connectionIds
+        let targets: string[];
+        if (ids.length === 0) {
+          // All sessions — collect all connectionIds
+          targets = [...terminalMap.values()];
+        } else {
+          // Map UUIDs → connectionIds, skip unresolvable ones
+          targets = ids.map((id) => terminalMap.get(id)).filter(Boolean) as string[];
+          // If no valid targets remain (all stale), fall back to all sessions
+          if (targets.length === 0) targets = [...terminalMap.values()];
+        }
+        if (targets.length === 0) continue;
 
         // Increment fire count
         taskCounts.set(kw, fired + 1);
         countsRef.current.set(task.id, taskCounts);
 
-        const data = cmd.endsWith('\n') ? cmd : cmd + '\n';
-        const writeCmd = getWriteCommand(target);
+        // Split multi-line commands and send to each target
+        const lines = rawCmd.split('\n').map((l) => l.trim()).filter(Boolean);
         console.log(
-          `[TaskMonitor] ✅ TRIGGERED task="${task.name}" cmd="${data.trim()}" target=${target} count=${fired + 1}`,
-        );
-        invoke(writeCmd, { sessionId: target, data }).catch(
-          (e) => console.error(`[TaskMonitor] write failed:`, e),
+          `[TaskMonitor] ✅ TRIGGERED task="${task.name}" targets=${targets.length} lines=${lines.length} mode=${mode} count=${fired + 1}`,
         );
 
-        // Clear buffer so the executed command's output plus the old
-        // keyword match don't cause infinite re-triggers.
+        for (const target of targets) {
+          for (const line of lines) {
+            const data = line.endsWith('\n') ? line : line + '\n';
+            const writeCmd = getWriteCommand(target);
+            console.log(`[TaskMonitor]   → target=${target} cmd=${writeCmd} data="${line}"`);
+            invoke(writeCmd, { sessionId: target, data }).catch(
+              (e) => console.error(`[TaskMonitor] write failed:`, e),
+            );
+          }
+        }
+
+        // Clear buffer to prevent infinite re-triggers
         bufferRef.current = '';
         lastLenRef.current = outputChunks.length;
-        return; // exit loops — buffer is reset, reprocess fresh chunks next tick
+        return;
       }
     }
   }, [outputChunks, realtimeTasks, sessionId, tick, uiSessionName]);

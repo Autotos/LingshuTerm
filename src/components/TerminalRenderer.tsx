@@ -174,12 +174,10 @@ function createChunkedWriter(
       const delay = Math.max(0, MIN_WRITE_INTERVAL_MS - timeSinceLastWrite);
       
       if (delay > 0) {
-        // Need to wait before writing to enforce minimum interval
         setTimeout(() => {
           term.write(merged);
+          term.scrollToBottom();
           lastWriteTime = performance.now();
-          
-          // If more data arrived while xterm is processing, schedule another flush
           if (queue.length > 0) {
             flushTimer = setTimeout(flushToTerminal, BATCH_FLUSH_MS);
           } else {
@@ -188,16 +186,17 @@ function createChunkedWriter(
         }, delay);
         return;
       }
-      
+
       // No delay needed, write immediately
       term.write(merged);
+      term.scrollToBottom();
       lastWriteTime = performance.now();
     } else {
       let off = 0;
       const t = term;
       function writeNextChunk() {
         if (off >= merged.length) {
-          // If more data arrived while xterm is processing, schedule another flush
+          t.scrollToBottom();
           if (queue.length > 0) {
             flushTimer = setTimeout(flushToTerminal, BATCH_FLUSH_MS);
           } else {
@@ -222,6 +221,7 @@ function createChunkedWriter(
     }
 
     // If more data arrived while xterm is processing, schedule another flush
+    term.scrollToBottom();
     if (queue.length > 0) {
       flushTimer = setTimeout(flushToTerminal, BATCH_FLUSH_MS);
     } else {
