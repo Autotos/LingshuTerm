@@ -24,40 +24,60 @@ pub async fn get_terminal_cwd(
     }
 }
 
-/// Write input to terminal
+/// Write input to terminal.
+/// Dispatches by session_id prefix:
+///   - `session-*` → PtyManager (local PTY)
+///   - `ssh-*` / `telnet-*` / `serial-*` → ConnectionManager (remote)
 #[tauri::command]
 pub async fn write_to_terminal(
-    manager: State<'_, PtyManager>,
+    pty: State<'_, PtyManager>,
+    conn: State<'_, ConnectionManager>,
     session_id: String,
     data: String,
 ) -> Result<(), String> {
-    manager
-        .write_input(&session_id, data.as_bytes())
-        .map_err(|e| e.to_string())
+    if session_id.starts_with("session-") {
+        pty.write_input(&session_id, data.as_bytes())
+            .map_err(|e| e.to_string())
+    } else {
+        conn.write_input(&session_id, data.as_bytes())
+            .map_err(|e| e.to_string())
+    }
 }
 
-/// Resize terminal
+/// Resize terminal.
+/// Dispatches by session_id prefix same as write_to_terminal.
 #[tauri::command]
 pub async fn resize_terminal(
-    manager: State<'_, PtyManager>,
+    pty: State<'_, PtyManager>,
+    conn: State<'_, ConnectionManager>,
     session_id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    manager
-        .resize(&session_id, cols, rows)
-        .map_err(|e| e.to_string())
+    if session_id.starts_with("session-") {
+        pty.resize(&session_id, cols, rows)
+            .map_err(|e| e.to_string())
+    } else {
+        conn.resize(&session_id, cols, rows)
+            .map_err(|e| e.to_string())
+    }
 }
 
-/// Destroy a terminal session
+/// Destroy a terminal session.
+/// Dispatches by session_id prefix same as write_to_terminal.
 #[tauri::command]
 pub async fn destroy_session(
-    manager: State<'_, PtyManager>,
+    pty: State<'_, PtyManager>,
+    conn: State<'_, ConnectionManager>,
     session_id: String,
 ) -> Result<(), String> {
-    manager
-        .destroy_session(&session_id)
-        .map_err(|e| e.to_string())
+    if session_id.starts_with("session-") {
+        pty.destroy_session(&session_id)
+            .map_err(|e| e.to_string())
+    } else {
+        conn.disconnect(&session_id)
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Execute a command in block mode (wrapped with OSC 7701 markers).
