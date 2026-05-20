@@ -15,7 +15,12 @@
       "Bash(cargo doc *)",
       "Bash(cargo search *)",
       "Bash(cargo build *)",
-      "Bash(ls node_modules/@tauri-apps/)"
+      "Bash(ls node_modules/@tauri-apps/)",
+      "Bash(npx tsx -e ' *)",
+      "Bash(node -e ' *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
