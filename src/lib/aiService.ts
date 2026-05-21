@@ -136,10 +136,12 @@ const SYSTEM_PROMPT = `你是一位专业的 Linux/macOS/Windows 运维专家，
 async function chatCompletion(
   provider: AiProviderConfig,
   messages: ChatMessage[],
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
 ): Promise<string> {
+  // Check for cancellation before making the request
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
   // Route through Tauri backend proxy to bypass browser CORS.
-  // The Rust side makes the actual HTTP call via reqwest.
   const { invoke } = await import('@tauri-apps/api/core');
 
   const resp: { status: number; body: string; ok: boolean } = await invoke(
@@ -155,6 +157,9 @@ async function chatCompletion(
       },
     },
   );
+
+  // Check for cancellation after the request (discard stale results)
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   if (!resp.ok) {
     throw new Error(`AI API error ${resp.status}: ${resp.body.slice(0, 200)}`);

@@ -25,6 +25,9 @@ interface SessionState {
   /** Switch the active terminal tab within a session. */
   setActiveTerminalIndex: (sessionId: string, index: number) => void;
 
+  /** Move a terminal from position `fromIndex` to `toIndex` (no-op on backend). */
+  moveTerminal: (sessionId: string, fromIndex: number, toIndex: number) => void;
+
   /** Toggle per-terminal logging for a tab. */
   toggleTerminalLogging: (sessionId: string, terminalId: string) => void;
 
@@ -180,6 +183,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (!session) return state;
       const next = new Map(state.sessions);
       next.set(sessionId, { ...session, activeTerminalIndex: index });
+      return { sessions: next };
+    }),
+
+  moveTerminal: (sessionId, fromIndex, toIndex) =>
+    set((state) => {
+      const session = state.sessions.get(sessionId);
+      if (!session) return state;
+      const terms = [...session.terminals];
+      if (fromIndex < 0 || fromIndex >= terms.length) return state;
+      if (toIndex < 0 || toIndex >= terms.length) return state;
+      const [item] = terms.splice(fromIndex, 1);
+      terms.splice(toIndex, 0, item);
+      // Adjust activeTerminalIndex
+      let newActive = session.activeTerminalIndex;
+      if (session.activeTerminalIndex === fromIndex) {
+        newActive = toIndex;
+      } else if (fromIndex < session.activeTerminalIndex && toIndex >= session.activeTerminalIndex) {
+        newActive = session.activeTerminalIndex - 1;
+      } else if (fromIndex > session.activeTerminalIndex && toIndex <= session.activeTerminalIndex) {
+        newActive = session.activeTerminalIndex + 1;
+      }
+      const next = new Map(state.sessions);
+      next.set(sessionId, { ...session, terminals: terms, activeTerminalIndex: newActive });
       return { sessions: next };
     }),
 

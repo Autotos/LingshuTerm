@@ -5,23 +5,18 @@ interface BottomInputAreaProps {
   executeCommand: (command: string) => Promise<string | null>;
   isExecuting: boolean;
   onAiSubmit?: (query: string) => Promise<void>;
+  onAiCancel?: () => void;
   isAiLoading?: boolean;
   aiError?: string | null;
   onClearAiError?: () => void;
 }
 
-/**
- * Fixed bottom input bar.
- *
- * Always shown — the terminal is visible in both hidden and split modes.
- * When xterm.js is focused, the terminal handles input natively via
- * onData; the bottom bar serves as an alternative input method.
- */
 export function BottomInputArea({
   sessionId,
   executeCommand,
   isExecuting,
   onAiSubmit,
+  onAiCancel,
   isAiLoading,
   aiError,
   onClearAiError,
@@ -32,6 +27,7 @@ export function BottomInputArea({
         sessionId={sessionId}
         onExecute={executeCommand}
         onAiSubmit={onAiSubmit}
+        onAiCancel={onAiCancel}
         isExecuting={isExecuting}
         isAiLoading={isAiLoading}
         aiError={aiError}

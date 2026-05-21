@@ -20,6 +20,7 @@ interface UseAiSubmitOptions {
 
 interface UseAiSubmitReturn {
   submitAiQuery: (query: string) => Promise<void>;
+  cancelAiQuery: () => void;
   isLoading: boolean;
   error: string | null;
   clearError: () => void;
@@ -41,8 +42,12 @@ function resolveSessionName(connectionId: string): string {
 }
 
 /**
- * Execute a terminal-creation action: build config, create terminal, show feedback.
- * Returns true on success.
+ * Execute a terminal-creation action: build config, create terminal(s), show feedback.
+ * Supports:
+ *   - Single terminal (host only)
+ *   - Multiple terminals to same host (count > 1)
+ *   - Multiple terminals from IP range (hosts array, e.g. 192.168.1.2-10)
+ * Returns true if at least one terminal was created successfully.
  */
 async function executeTerminalCreate(
   action: ReturnType<typeof detectTerminalCreateIntent>,
@@ -51,28 +56,60 @@ async function executeTerminalCreate(
   if (!action) return false;
 
   const { payload } = action;
-  const config = actionToConnectionConfig(action);
-  const label = connectionLabel(config);
+  const baseConfig = actionToConnectionConfig(action);
 
-  out.append(`[Action] 已解析连接信息，正在建立 ${payload.protocol.toUpperCase()} 连接到 ${payload.host || payload.portName || '?'}...`);
+  // Determine the list of hosts to connect to
+  const hostList: string[] = payload.hosts && payload.hosts.length > 0
+    ? payload.hosts
+    : [payload.host || payload.portName || ''];
 
+  // Determine how many terminals per host
+  const perHost = Math.max(1, payload.count ?? 1);
+
+  // Ensure session exists
   let targetSessionId = useSessionStore.getState().activeSessionId;
   if (!targetSessionId) {
-    targetSessionId = useSessionStore.getState().addSession(label);
-    out.append(`[Action] 自动创建会话: ${targetSessionId}`);
+    const sessionName = payload.sessionName || connectionLabel(baseConfig);
+    targetSessionId = useSessionStore.getState().addSession(sessionName);
+    out.append(`[Action] 自动创建会话: ${sessionName} (${targetSessionId})`);
   }
 
-  try {
-    await useSessionStore.getState().addTerminal(targetSessionId, config, label);
-    out.append(`[Action] 终端 ${label} 已就绪，请查看终端面板`);
-    out.setStatus('done');
-    return true;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    out.append(`[Action] 终端创建失败: ${msg}`);
+  const total = hostList.length * perHost;
+  if (total > 50) {
+    out.append(`[Action] 拒绝: 终端数量 ${total} 超过上限 50，请缩小范围`);
     out.setStatus('error');
     return false;
   }
+  out.append(`[Action] 准备创建 ${total} 个终端 (${hostList.length} 个主机 × ${perHost} 个/主机)...`);
+
+  let created = 0;
+  for (const host of hostList) {
+    for (let i = 0; i < perHost; i++) {
+      const config = host !== (payload.host || payload.portName || '')
+        ? { ...baseConfig, host } as typeof baseConfig
+        : baseConfig;
+      const label = connectionLabel(config);
+      try {
+        await useSessionStore.getState().addTerminal(targetSessionId, config, label);
+        created++;
+        if (total <= 5) {
+          out.append(`[Action] 终端 ${label} 已就绪`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        out.append(`[Action] 终端 ${label} 创建失败: ${msg}`);
+      }
+    }
+  }
+
+  if (created > 0) {
+    out.append(`[Action] 共创建 ${created}/${total} 个终端，请查看终端面板`);
+    out.setStatus('done');
+    return true;
+  }
+  out.append('[Action] 所有终端创建均失败');
+  out.setStatus('error');
+  return false;
 }
 
 /**
@@ -228,7 +265,15 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
     [sessionId, isLoading],
   );
 
+  const cancelAiQuery = useCallback(() => {
+    abortRef.current?.abort();
+    setIsLoading(false);
+    const out = useOutputStore.getState();
+    out.append('[诊断] AI 请求已取消');
+    out.setStatus('done');
+  }, []);
+
   const clearError = useCallback(() => setError(null), []);
 
-  return { submitAiQuery, isLoading, error, clearError };
+  return { submitAiQuery, cancelAiQuery, isLoading, error, clearError };
 }

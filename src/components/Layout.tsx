@@ -59,7 +59,7 @@ export function Layout() {
 
   // ── Hooks for BottomInputArea (use backend connection ID) ──
   const { executeCommand, isExecuting } = useBlockSession({ sessionId: activeConnectionId });
-  const { submitAiQuery, isLoading: isAiLoading, error: aiError, clearError: clearAiError } =
+  const { submitAiQuery, cancelAiQuery, isLoading: isAiLoading, error: aiError, clearError: clearAiError } =
     useAiSubmit({ sessionId: activeConnectionId });
   useTaskQueue({ sessionId: activeConnectionId });
 
@@ -155,6 +155,7 @@ export function Layout() {
             executeCommand={executeCommand}
             isExecuting={isExecuting}
             onAiSubmit={submitAiQuery}
+            onAiCancel={cancelAiQuery}
             isAiLoading={isAiLoading}
             aiError={aiError}
             onClearAiError={clearAiError}

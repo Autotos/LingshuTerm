@@ -2,19 +2,26 @@ import { useState, useRef, useCallback, type KeyboardEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Loader2, Zap, Terminal } from 'lucide-react';
 import { detectInputType } from '@/lib/aiDetect';
-import { parseControlCommand, executeControlIntent } from '@/lib/commandParser';
+import {
+  parseControlCommand,
+  executeControlIntent,
+  getPendingConfirmation,
+  clearPendingConfirmation,
+  parseConfirmationResponse,
+} from '@/lib/commandParser';
 
 interface CommandInputProps {
   sessionId: string | null;
   onExecute: (command: string) => Promise<string | null>;
   onAiSubmit?: (query: string) => Promise<void>;
+  onAiCancel?: () => void;
   isExecuting: boolean;
   isAiLoading?: boolean;
   aiError?: string | null;
   onClearAiError?: () => void;
 }
 
-export function CommandInput({ sessionId, onExecute, onAiSubmit, isExecuting, isAiLoading, aiError, onClearAiError }: CommandInputProps) {
+export function CommandInput({ sessionId, onExecute, onAiSubmit, onAiCancel, isExecuting, isAiLoading, aiError, onClearAiError }: CommandInputProps) {
   const [value, setValue] = useState('');
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [controlMsg, setControlMsg] = useState<string | null>(null);
@@ -35,6 +42,24 @@ export function CommandInput({ sessionId, onExecute, onAiSubmit, isExecuting, is
     setValue('');
     setControlMsg(null);
 
+    // ── Step 0: check for pending confirmation response (是/否) ──
+    const pending = getPendingConfirmation();
+    if (pending) {
+      const response = parseConfirmationResponse(cmd);
+      if (response === true) {
+        await pending.action();
+        setControlMsg(`已创建会话 "${pending.sessionName}"`);
+      } else if (response === false) {
+        setControlMsg('已取消');
+      } else {
+        // Not a valid yes/no — treat as normal input, but remind
+        setControlMsg(pending.message);
+        return;
+      }
+      clearPendingConfirmation();
+      return;
+    }
+
     // ── Step 1: check for UI control commands ──
     const intent = parseControlCommand(cmd);
     if (intent) {
@@ -54,14 +79,19 @@ export function CommandInput({ sessionId, onExecute, onAiSubmit, isExecuting, is
   }, [value, isBusy, onExecute, onAiSubmit, onClearAiError]);
 
   const handleCancel = useCallback(async () => {
+    // If AI is loading, cancel the AI request
+    if (isAiLoading) {
+      onAiCancel?.();
+      return;
+    }
+    // Otherwise send Ctrl+C to the terminal
     if (!sessionId) return;
-    // Send Ctrl+C (ETX) to the PTY to interrupt the running command
     try {
       await invoke('write_to_terminal', { sessionId, data: '\x03' });
     } catch (err) {
       console.error('Failed to send SIGINT:', err);
     }
-  }, [sessionId]);
+  }, [sessionId, isAiLoading, onAiCancel]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
