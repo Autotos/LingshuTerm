@@ -14,7 +14,7 @@ import {
   defaultSshConfig,
   defaultTelnetConfig,
   defaultSerialConfig,
-  connectionLabel,
+  connectionShortLabel,
 } from '@/models/connection';
 
 type Category = 'remote' | 'local';
@@ -145,7 +145,7 @@ export function TerminalConnectModal() {
         if (portNum < 1 || portNum > 65535) throw new Error('Port must be between 1 and 65535');
       }
 
-      const label = connectionLabel(config);
+      const label = connectionShortLabel(config);
       await addTerminal(terminalModalSessionId, config, label);
       close();
     } catch (err) {

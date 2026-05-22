@@ -88,8 +88,10 @@ export function Layout() {
 
           {/* ── Terminal + Editor drawer ── */}
           <div className="flex-1 min-h-0 flex flex-row overflow-hidden">
-            <div className="flex-1 min-w-0 overflow-hidden flex flex-col">
-              {/* One xterm.js instance per terminal tab — only active is visible */}
+            {/* Stack terminals with absolute positioning — inactive ones render
+                offscreen to keep WebGL contexts alive, avoiding "context not restored"
+                errors and blank screens on tab switch. */}
+            <div className="flex-1 min-w-0 overflow-hidden relative">
               {Array.from(sessions.values()).map((s) => {
                 const isSessionActive = s.id === activeSessionId;
                 return (
@@ -102,7 +104,16 @@ export function Layout() {
                       return (
                         <div
                           key={`term-${term.id}`}
-                          className={isActiveTerm ? 'flex-1 flex flex-col min-h-0 min-w-0' : 'hidden'}
+                          className={`absolute flex flex-col min-h-0 ${
+                            isActiveTerm
+                              ? 'inset-0 z-10'
+                              : 'z-0'
+                          }`}
+                          style={
+                            isActiveTerm
+                              ? undefined
+                              : { top: 0, left: '-9999px', width: '100%', height: '100%' }
+                          }
                         >
                           <UnifiedSessionPanel
                             sessionId={term.connectionId}

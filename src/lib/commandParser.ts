@@ -50,14 +50,23 @@ export function parseConfirmationResponse(input: string): boolean | null {
 
 interface Pattern {
   regex: RegExp;
-  extract: (m: RegExpMatchArray) => ControlIntent;
+  extract: (m: RegExpMatchArray) => ControlIntent | null;
 }
+
+// Session names must not contain IPs or terminal keywords (reject SSH commands that happen to contain "打开")
+const INVALID_SESSION_NAME = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})|(ssh|telnet|serial|passwd|password|user|用户|密码|端口)/i;
 
 const PATTERNS: Pattern[] = [
   // "打开 Default 会话" / "open Default session" / "打开 Default"
+  // ^ anchor: only match at start of input so "新建X，打开Y" doesn't falsely trigger
   {
-    regex: /(?:打开|open|switch\s+to)\s*(.+?)(?:\s*(?:会话|session|窗口|window))?\s*$/i,
-    extract: (m) => ({ type: 'OPEN_SESSION', sessionName: m[1].replace(/['"]/g, '').trim() }),
+    regex: /^(?:打开|open|switch\s+to)\s*(.+?)(?:\s*(?:会话|session|窗口|window))?\s*$/i,
+    extract: (m) => {
+      const name = m[1].replace(/['"]/g, '').trim();
+      // Reject if captured name contains IPs or terminal-related keywords
+      if (INVALID_SESSION_NAME.test(name)) return null;
+      return { type: 'OPEN_SESSION', sessionName: name };
+    },
   },
   // "新建终端" / "new terminal" / "创建终端"
   {
@@ -80,7 +89,8 @@ export function parseControlCommand(input: string): ControlIntent | null {
   for (const pat of PATTERNS) {
     const m = trimmed.match(pat.regex);
     if (m) {
-      return pat.extract(m);
+      const intent = pat.extract(m);
+      if (intent) return intent;
     }
   }
   return null;

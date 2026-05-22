@@ -4,6 +4,7 @@ import { generateSessionId, generateTerminalId } from '@/models/session';
 import type { SessionMode } from '@/models/sessionData';
 import { invoke } from '@tauri-apps/api/core';
 import type { ConnectionConfig } from '@/models/connection';
+import { disposeCachedTerminal } from '@/hooks/useTerminal';
 
 interface SessionState {
   sessions: Map<string, SessionInfo>;
@@ -27,6 +28,13 @@ interface SessionState {
 
   /** Move a terminal from position `fromIndex` to `toIndex` (no-op on backend). */
   moveTerminal: (sessionId: string, fromIndex: number, toIndex: number) => void;
+
+  /**
+   * Atomic operation: move hidden terminal into visible zone and activate it.
+   * Moves the terminal at `fromIndex` (hidden) to `lastVisibleIdx` (last visible slot),
+   * sets it as active, and shifts the displaced tab into the hidden zone.
+   */
+  cycleTerminalIntoView: (sessionId: string, fromIndex: number, lastVisibleIdx: number) => void;
 
   /** Toggle per-terminal logging for a tab. */
   toggleTerminalLogging: (sessionId: string, terminalId: string) => void;
@@ -78,6 +86,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Destroy all PTY connections for this session
       if (session) {
         for (const term of session.terminals) {
+          disposeCachedTerminal(term.connectionId);
           invoke('destroy_session', { sessionId: term.connectionId }).catch(() => {});
         }
       }
@@ -130,9 +139,24 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Create backend PTY/connection
     const connectionId: string = await invoke('create_session', { config });
     const termId = generateTerminalId();
+    const baseTitle = title ?? `Terminal ${connectionId}`;
+
+    // Deduplicate: if same title exists, append " (2)", " (3)", etc.
+    const state = get();
+    const session = state.sessions.get(sessionId);
+    let deduped = baseTitle;
+    if (session) {
+      const existing = new Set(session.terminals.map((t) => t.title));
+      if (existing.has(deduped)) {
+        let n = 2;
+        while (existing.has(`${baseTitle} (${n})`)) n++;
+        deduped = `${baseTitle} (${n})`;
+      }
+    }
+
     const instance: TerminalInstance = {
       id: termId,
-      title: title ?? `Terminal ${connectionId}`,
+      title: deduped,
       connectionId,
       config,
       isLogging: false,
@@ -159,7 +183,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (!session) return;
     const term = session.terminals.find((t) => t.id === terminalId);
     if (!term) return;
-    // Destroy backend PTY
+    // Destroy backend PTY and frontend terminal cache
+    disposeCachedTerminal(term.connectionId);
     await invoke('destroy_session', { sessionId: term.connectionId }).catch(() => {});
     set((s) => {
       const cur = s.sessions.get(sessionId);
@@ -209,6 +234,27 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return { sessions: next };
     }),
 
+  // Atomic: move hidden tab into view + activate — single set() avoids race
+  cycleTerminalIntoView: (sessionId, fromIndex, lastVisibleIdx) =>
+    set((state) => {
+      const session = state.sessions.get(sessionId);
+      if (!session) return state;
+      const terms = [...session.terminals];
+      if (fromIndex < 0 || fromIndex >= terms.length) return state;
+      const toIdx = Math.max(0, Math.min(lastVisibleIdx, terms.length - 1));
+      if (fromIndex === toIdx) {
+        // Already in position; just activate
+        const next = new Map(state.sessions);
+        next.set(sessionId, { ...session, activeTerminalIndex: toIdx });
+        return { sessions: next };
+      }
+      const [item] = terms.splice(fromIndex, 1);
+      terms.splice(toIdx, 0, item);
+      const next = new Map(state.sessions);
+      next.set(sessionId, { ...session, terminals: terms, activeTerminalIndex: toIdx });
+      return { sessions: next };
+    }),
+
   toggleTerminalLogging: (sessionId, terminalId) =>
     set((state) => {
       const session = state.sessions.get(sessionId);
@@ -250,6 +296,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
     // Destroy any existing (stale) terminals first
     for (const term of session.terminals) {
+      disposeCachedTerminal(term.connectionId);
       invoke('destroy_session', { sessionId: term.connectionId }).catch(() => {});
     }
 

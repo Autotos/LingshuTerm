@@ -30,6 +30,31 @@ interface UseTerminalOptions {
   sessionId: string | null;
 }
 
+// ─── Module-level terminal instance cache ──────────────────────────
+// Terminal instances MUST outlive React component lifecycle.
+// React may unmount/remount components during reconciliation with arrays
+// (even with stable keys), which would call terminal.dispose() and
+// destroy the xterm buffer.  This cache keeps the instance alive so
+// re-mounting simply re-attaches to the new DOM container.
+// Map key = connectionId (stable backend session identifier).
+
+interface CachedTerminal {
+  terminal: Terminal;
+  fitAddon: FitAddon;
+  webglAddon: WebglAddon | null;
+}
+
+const terminalCache = new Map<string, CachedTerminal>();
+
+export function disposeCachedTerminal(connectionId: string): void {
+  const cached = terminalCache.get(connectionId);
+  if (cached) {
+    try { cached.webglAddon?.dispose(); } catch { /* ignore */ }
+    try { cached.terminal.dispose(); } catch { /* ignore */ }
+    terminalCache.delete(connectionId);
+  }
+}
+
 export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -65,97 +90,103 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     flushInputBuffer();
   }, [flushInputBuffer]);
 
-  // Initialize terminal
+  // ── Initialize terminal (with module-level cache) ──
+  // Only creates a new Terminal on first mount for a given sessionId.
+  // On remount (React reconciliation), reuses the cached instance.
   useEffect(() => {
-    if (!containerRef.current || terminalRef.current) return;
-
     const container = containerRef.current;
+    if (!container) return;
 
-    const fontSize = 13;
-    const estCharW = fontSize * 0.6;
-    const estCharH = fontSize * 1.5;
-    const estCols =
-      container.clientWidth > 0
-        ? Math.max(80, Math.min(500, Math.floor((container.clientWidth - 8) / estCharW)))
-        : 80;
-    const estRows =
-      container.clientHeight > 0
-        ? Math.max(24, Math.min(200, Math.floor(container.clientHeight / estCharH)))
-        : 24;
+    const key = sessionId ?? '__no_session__';
 
-    const terminal = new Terminal({
-      allowProposedApi: true,
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      cols: estCols,
-      rows: estRows,
-      fontFamily: 'Berkeley Mono, JetBrains Mono, SF Mono, Monaco, Menlo, Consolas, monospace',
-      fontSize,
-      lineHeight: 1.4,
-      theme: {
-        background: '#0e0e0d',
-        foreground: '#faf9f6',
-        cursor: '#a0917e',
-        cursorAccent: '#0e0e0d',
-        selectionBackground: 'rgba(160, 145, 126, 0.25)',
-        black: '#1c1c1b',
-        red: '#d4867c',
-        green: '#8fba7a',
-        yellow: '#c9b87a',
-        blue: '#7ea8c7',
-        magenta: '#b08dba',
-        cyan: '#8fb8b8',
-        white: '#afaeac',
-        brightBlack: '#666469',
-        brightRed: '#e09a90',
-        brightGreen: '#a3c990',
-        brightYellow: '#d9ca8e',
-        brightBlue: '#95bad4',
-        brightMagenta: '#c4a4cc',
-        brightCyan: '#a6c9c9',
-        brightWhite: '#faf9f6',
-      },
-      scrollback: 500,
-      fastScrollModifier: 'alt',
-      fastScrollSensitivity: 5,
-      smoothScrollDuration: 0,
-      convertEol: true,
-    });
+    // 1. Try cache first
+    let cached = terminalCache.get(key);
+    if (!cached) {
+      const fontSize = 13;
+      const estCharW = fontSize * 0.6;
+      const estCharH = fontSize * 1.5;
+      const estCols =
+        container.clientWidth > 0
+          ? Math.max(80, Math.min(500, Math.floor((container.clientWidth - 8) / estCharW)))
+          : 80;
+      const estRows =
+        container.clientHeight > 0
+          ? Math.max(24, Math.min(200, Math.floor(container.clientHeight / estCharH)))
+          : 24;
 
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
+      const terminal = new Terminal({
+        allowProposedApi: true,
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        cols: estCols,
+        rows: estRows,
+        fontFamily: 'Berkeley Mono, JetBrains Mono, SF Mono, Monaco, Menlo, Consolas, monospace',
+        fontSize,
+        lineHeight: 1.4,
+        theme: {
+          background: '#0e0e0d',
+          foreground: '#faf9f6',
+          cursor: '#a0917e',
+          cursorAccent: '#0e0e0d',
+          selectionBackground: 'rgba(160, 145, 126, 0.25)',
+          black: '#1c1c1b',
+          red: '#d4867c',
+          green: '#8fba7a',
+          yellow: '#c9b87a',
+          blue: '#7ea8c7',
+          magenta: '#b08dba',
+          cyan: '#8fb8b8',
+          white: '#afaeac',
+          brightBlack: '#666469',
+          brightRed: '#e09a90',
+          brightGreen: '#a3c990',
+          brightYellow: '#d9ca8e',
+          brightBlue: '#95bad4',
+          brightMagenta: '#c4a4cc',
+          brightCyan: '#a6c9c9',
+          brightWhite: '#faf9f6',
+        },
+        scrollback: 500,
+        fastScrollModifier: 'alt',
+        fastScrollSensitivity: 5,
+        smoothScrollDuration: 0,
+        convertEol: true,
+      });
 
-    terminal.open(container);
+      const fitAddon = new FitAddon();
+      terminal.loadAddon(fitAddon);
 
-    let webglAddon: WebglAddon | null = null;
-    try {
-      webglAddon = new WebglAddon();
-      terminal.loadAddon(webglAddon);
-      webglAddonRef.current = webglAddon;
-    } catch (e) {
-      console.warn('[Terminal] WebGL not available, falling back to canvas rendering', e);
-      webglAddon = null;
+      let webglAddon: WebglAddon | null = null;
+      try {
+        webglAddon = new WebglAddon();
+        terminal.loadAddon(webglAddon);
+      } catch (e) {
+        console.warn('[Terminal] WebGL not available, falling back to canvas rendering', e);
+      }
+
+      cached = { terminal, fitAddon, webglAddon };
+      terminalCache.set(key, cached);
     }
+
+    const { terminal, fitAddon, webglAddon } = cached;
+
+    // 2. Attach to current DOM container.  terminal.open() is idempotent —
+    //    xterm skips re-init if already open; appendChild is harmless.
+    terminal.open(container);
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    webglAddonRef.current = webglAddon;
 
+    // 3. Cleanup: detach from DOM, but DO NOT dispose the Terminal instance.
+    //    The instance lives in terminalCache and will be reused on remount.
     return () => {
-      try {
-        terminal.dispose();
-      } catch {
-        /* ignore */
-      }
       terminalRef.current = null;
-      try {
-        webglAddonRef.current?.dispose();
-      } catch {
-        /* ignore */
-      }
-      webglAddonRef.current = null;
       fitAddonRef.current = null;
+      webglAddonRef.current = null;
+      // Intentionally NOT calling terminal.dispose() — instance stays cached.
     };
-  }, [containerRef]);
+  }, [containerRef, sessionId]);
 
   // Reset connection state when sessionId changes
   useEffect(() => {
@@ -330,6 +361,27 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     return terminalRef.current?.getSelection() ?? '';
   }, []);
 
+  const wake = useCallback(() => {
+    const t = terminalRef.current;
+    if (!t) return;
+    // Emergency recovery: reload WebGL renderer if context was lost
+    // (should not happen during normal tab switches — only if browser
+    //  aggressively reclaimed GPU resources).
+    try { webglAddonRef.current?.dispose(); } catch { /* ignore */ }
+    webglAddonRef.current = null;
+    try {
+      const newWebgl = new WebglAddon();
+      t.loadAddon(newWebgl);
+      webglAddonRef.current = newWebgl;
+      // Update cache
+      const key = sessionId ?? '__no_session__';
+      const cached = terminalCache.get(key);
+      if (cached) terminalCache.set(key, { ...cached, webglAddon: newWebgl });
+    } catch { /* webgl unavailable */ }
+    try { fitAddonRef.current?.fit(); } catch { /* ignore */ }
+    try { t.refresh(0, t.rows - 1); } catch { /* ignore */ }
+  }, [sessionId]);
+
   return {
     terminal: terminalRef.current,
     terminalRef,
@@ -338,5 +390,6 @@ export function useTerminal({ containerRef, sessionId }: UseTerminalOptions) {
     clear,
     getSelection,
     setConnectionReady,
+    wake,
   };
 }

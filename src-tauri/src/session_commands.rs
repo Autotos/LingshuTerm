@@ -46,6 +46,19 @@ pub async fn create_session(
     }
 }
 
+/// Query remote server statistics (CPU / memory / disk / users / network)
+/// for an active SSH session.  Only works for `ssh-*` prefixed session IDs.
+#[tauri::command]
+pub async fn query_server_stats(
+    conn: State<'_, ConnectionManager>,
+    session_id: String,
+) -> Result<String, String> {
+    if !session_id.starts_with("ssh-") {
+        return Err("Server stats only available for SSH sessions".to_string());
+    }
+    conn.query_server_stats(&session_id).await.map_err(|e| e.to_string())
+}
+
 /// Enumerate local shells available on the current OS.
 #[tauri::command]
 pub async fn list_local_shells() -> Result<Vec<LocalShellOption>, String> {

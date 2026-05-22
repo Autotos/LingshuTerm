@@ -194,6 +194,65 @@ impl ConnectionManager {
         }
     }
 
+    /// Query remote server statistics via a SEPARATE SSH exec channel.
+    /// Does NOT touch the user's interactive PTY — output is invisible to the terminal.
+    pub async fn query_server_stats(&self, session_id: &str) -> Result<String> {
+        let handle = self
+            .get_ssh_handle(session_id)
+            .ok_or_else(|| anyhow::anyhow!("SSH handle not found for: {}", session_id))?;
+
+        // Pure-shell stats command — no python3 dependency.
+        // Collects CPU / memory / disk / users / network bytes in one JSON line.
+        let cmd = r#"cpu=$(cat /proc/stat 2>/dev/null|head -1|awk '{printf "%.1f",100-($5*100/($2+$3+$4+$5+$6+$7+$8))}');cpu=${cpu:-0};mem=$(free -m 2>/dev/null|awk '/Mem:/{printf "%s,%s",$3,$2}');disk=$(df -h / 2>/dev/null|tail -1|awk '{printf "%s,%s",$3,$2}');users=$(who -q 2>/dev/null|tail -1|grep -oP '[0-9]+');users=${users:-0};rx=$(cat /sys/class/net/*/statistics/rx_bytes 2>/dev/null|paste -sd+|bc 2>/dev/null);rx=${rx:-0};tx=$(cat /sys/class/net/*/statistics/tx_bytes 2>/dev/null|paste -sd+|bc 2>/dev/null);tx=${tx:-0};echo "{\"cpu\":$cpu,\"mem\":\"$mem\",\"disk\":\"$disk\",\"users\":\"$users\",\"rx\":$rx,\"tx\":$tx}"
+"#;
+
+        // Open a fresh exec channel — completely isolated from the user's PTY.
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .context("Failed to open stats exec channel")?;
+
+        channel
+            .exec(true, cmd)
+            .await
+            .context("Failed to exec stats command")?;
+
+        // Read output with timeout.
+        let mut output = String::new();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(8);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match tokio::time::timeout(remaining, channel.wait()).await {
+                Ok(Some(russh::ChannelMsg::Data { data })) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Some(russh::ChannelMsg::Eof)) | Ok(None) => break,
+                Ok(Some(russh::ChannelMsg::ExitStatus { .. })) => {
+                    // Drain any remaining data after exit status
+                    continue;
+                }
+                Ok(Some(_)) => continue, // skip other message types
+                Err(_) => break, // timeout
+            }
+        }
+
+        let _ = channel.close().await;
+
+        // Extract the last complete JSON line from output
+        let json = output
+            .lines()
+            .filter(|l| l.starts_with('{') && l.contains("\"cpu\""))
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("No valid stats JSON in exec output"))?;
+
+        Ok(json.trim().to_string())
+    }
+
     /// Remove a session from the manager (called on disconnect or SFTP cleanup).
     pub fn remove_session(&self, session_id: &str) {
         self.sessions.write().unwrap().remove(session_id);
@@ -318,7 +377,7 @@ impl ConnectionManager {
                                             }
                                         }
                                     }
-                                    
+
                                     // Now apply throttle AFTER releasing the lock
                                     // This doesn't block rx.recv() in the select! loop
                                     if len >= 2048 {

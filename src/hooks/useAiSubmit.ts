@@ -9,10 +9,9 @@ import type { ChatMessage } from '@/lib/aiService';
 import { assemblePrompt, appendShortTerm } from '@/lib/memoryService';
 import {
   detectTerminalCreateIntent,
-  diagnosticTrace,
   actionToConnectionConfig,
 } from '@/lib/terminalAction';
-import { connectionLabel } from '@/models/connection';
+import { connectionLabel, connectionShortLabel } from '@/models/connection';
 
 interface UseAiSubmitOptions {
   sessionId: string | null;
@@ -26,10 +25,6 @@ interface UseAiSubmitReturn {
   clearError: () => void;
 }
 
-/**
- * Resolve the user-facing session name from a terminal connection ID.
- * Falls back to the connection ID itself if lookup fails.
- */
 function resolveSessionName(connectionId: string): string {
   const sessions = useSessionStore.getState().sessions;
   for (const [, s] of sessions) {
@@ -41,14 +36,6 @@ function resolveSessionName(connectionId: string): string {
   return connectionId;
 }
 
-/**
- * Execute a terminal-creation action: build config, create terminal(s), show feedback.
- * Supports:
- *   - Single terminal (host only)
- *   - Multiple terminals to same host (count > 1)
- *   - Multiple terminals from IP range (hosts array, e.g. 192.168.1.2-10)
- * Returns true if at least one terminal was created successfully.
- */
 async function executeTerminalCreate(
   action: ReturnType<typeof detectTerminalCreateIntent>,
   out: ReturnType<typeof useOutputStore.getState>,
@@ -58,29 +45,24 @@ async function executeTerminalCreate(
   const { payload } = action;
   const baseConfig = actionToConnectionConfig(action);
 
-  // Determine the list of hosts to connect to
   const hostList: string[] = payload.hosts && payload.hosts.length > 0
     ? payload.hosts
     : [payload.host || payload.portName || ''];
 
-  // Determine how many terminals per host
   const perHost = Math.max(1, payload.count ?? 1);
 
-  // Ensure session exists
   let targetSessionId = useSessionStore.getState().activeSessionId;
   if (!targetSessionId) {
     const sessionName = payload.sessionName || connectionLabel(baseConfig);
     targetSessionId = useSessionStore.getState().addSession(sessionName);
-    out.append(`[Action] 自动创建会话: ${sessionName} (${targetSessionId})`);
   }
 
   const total = hostList.length * perHost;
   if (total > 50) {
-    out.append(`[Action] 拒绝: 终端数量 ${total} 超过上限 50，请缩小范围`);
+    out.append(`终端数量 ${total} 超过上限 50，请缩小范围`);
     out.setStatus('error');
     return false;
   }
-  out.append(`[Action] 准备创建 ${total} 个终端 (${hostList.length} 个主机 × ${perHost} 个/主机)...`);
 
   let created = 0;
   for (const host of hostList) {
@@ -88,40 +70,26 @@ async function executeTerminalCreate(
       const config = host !== (payload.host || payload.portName || '')
         ? { ...baseConfig, host } as typeof baseConfig
         : baseConfig;
-      const label = connectionLabel(config);
       try {
-        await useSessionStore.getState().addTerminal(targetSessionId, config, label);
+        await useSessionStore.getState().addTerminal(targetSessionId, config, connectionShortLabel(config));
         created++;
-        if (total <= 5) {
-          out.append(`[Action] 终端 ${label} 已就绪`);
-        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        out.append(`[Action] 终端 ${label} 创建失败: ${msg}`);
+        out.append(`${connectionLabel(config)}: ${msg}`);
       }
     }
   }
 
   if (created > 0) {
-    out.append(`[Action] 共创建 ${created}/${total} 个终端，请查看终端面板`);
+    out.append(`已创建 ${created} 个终端`);
     out.setStatus('done');
     return true;
   }
-  out.append('[Action] 所有终端创建均失败');
+  out.append('终端创建失败');
   out.setStatus('error');
   return false;
 }
 
-/**
- * Hook for submitting natural language queries to the AI service.
- *
- * Pipeline:
- *   1. Quick regex pre-extraction  (detectTerminalCreateIntent)
- *   2. LLM call with action-aware system prompt (nlToAction)
- *   3. Fallback: LLM task-step parsing (nlToTasks)
- *
- * Every step logs diagnostics to the Output panel so the user can follow progress.
- */
 export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitReturn {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -144,61 +112,39 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
         const config = useSettingsStore.getState().settings.ai;
         const provider = resolveProvider(config);
 
-        // ── Header ──
         out.setStatus('running');
         out.append(`> ${query}`);
 
-        // ── Phase 1: Regex quick detection (works WITHOUT sessionId) ──
-        out.append('[诊断] ── Phase 1: 前端正则预提取 ──');
+        // ── Phase 1: Regex terminal-creation detection ──
         const quickAction = detectTerminalCreateIntent(query);
         if (quickAction) {
-          const p = quickAction.payload;
-          out.append(`[诊断] 正则匹配成功 → protocol=${p.protocol}, host=${p.host || p.portName || '?'}, port=${p.port}, user=${p.username || '(默认)'}, pass=${p.password ? '***' : '(空)'}`);
-          out.append(`[Action] 正在建立 ${p.protocol.toUpperCase()} 连接到 ${p.host || p.portName}...`);
           const ok = await executeTerminalCreate(quickAction, out);
           if (ok) return;
-          // Terminal creation failed — this is a real error (auth, network, etc.).
-          // Do NOT fall through to LLM; the intent was already identified correctly.
-          out.append('[Action] 连接失败。请检查: 1) 目标主机是否可达 2) 用户名密码是否正确 3) 端口是否开放');
+          out.append('连接失败，请检查主机地址、用户名和端口是否正确');
           out.setStatus('error');
           return;
-        } else {
-          for (const line of diagnosticTrace(query)) {
-            out.append(line);
-          }
         }
 
-        // ── Phase 2 requires AI API ──
+        // ── Phase 2: LLM ──
         if (!provider.baseUrl) {
-          out.append('[诊断] AI API 未配置，跳过 Phase 2/3。请在设置中配置 AI 服务。');
-          if (!sessionId) {
-            out.append('[提示] 当前无活跃终端，无法执行命令。请先打开一个终端或通过 SSH 连接创建终端。');
-          }
+          out.append('AI API 未配置，请在设置中配置 AI 服务');
           out.setStatus('done');
           return;
         }
 
-        // ── Resolve memory ID ──
         const memoryId = sessionId
           ? resolveSessionName(sessionId)
           : (useSessionStore.getState().activeSessionId ?? 'global');
 
-        // ── Assemble memory context ──
         let preMessages: ChatMessage[] | undefined;
         try {
-          out.append('[诊断] 加载会话记忆...');
           const assembled = await assemblePrompt(memoryId, query);
           preMessages = assembled.messages;
-          out.append(`[诊断] 记忆加载完成 (${preMessages.length} 条消息)`);
-        } catch {
-          out.append('[诊断] 记忆加载失败，将不使用上下文');
-        }
+        } catch { /* proceed without memory */ }
 
-        // ── Phase 2: LLM action detection ──
-        out.append('[诊断] ── Phase 2: AI 语义分析 (nlToAction) ──');
+        // Try terminal-creation action first
         const llmAction = await nlToAction(config, query, controller.signal, preMessages);
         if (llmAction) {
-          out.append(`[诊断] AI 识别为终端创建: protocol=${llmAction.payload.protocol}, host=${llmAction.payload.host}`);
           const action = {
             type: 'TERMINAL_CREATE' as const,
             payload: {
@@ -213,28 +159,20 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
           };
           const ok = await executeTerminalCreate(action, out);
           if (ok) return;
-          out.append('[诊断] AI 路径创建失败，回退到任务解析...');
-        } else {
-          out.append('[诊断] AI 未识别为终端创建意图，进入任务解析模式');
         }
 
-        // ── Phase 3: LLM task-step parsing (needs sessionId for task binding) ──
-        out.append('[诊断] ── Phase 3: AI 任务解析 (nlToTasks) ──');
+        // Fallback: task-step parsing
         const steps = await nlToTasks(config, query, controller.signal, preMessages);
 
         if (steps.length === 0) {
-          out.append('[诊断] AI 未返回任何可执行命令');
           throw new Error('AI returned no executable commands');
         }
-
-        out.append(`[诊断] AI 返回 ${steps.length} 个任务步骤`);
 
         for (const s of steps) {
           out.append(`  $ ${s.command}  — ${s.description}`);
         }
         out.setStatus('done');
 
-        // ── Update short-term memory ──
         appendShortTerm(memoryId, [
           { role: 'user', content: query, ts: Date.now() },
           {
@@ -242,20 +180,17 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
             content: steps.map((s) => `${s.description}: ${s.command}`).join('\n'),
             ts: Date.now(),
           },
-        ]).catch(() => { /* non-critical */ });
+        ]).catch(() => {});
 
-        // Create task group (needs sessionId)
         if (sessionId) {
           useTaskStore.getState().createGroup(sessionId, query, steps);
           useUiStore.getState().setSidebarTab('tasks');
-        } else {
-          out.append('[提示] 无活跃终端，任务已生成但未绑定到终端。请先创建终端连接。');
         }
       } catch (err) {
         if ((err as Error).name !== 'AbortError') {
           const msg = err instanceof Error ? err.message : String(err);
           out.setStatus('error');
-          out.append(`[Error] ${msg}`);
+          out.append(msg);
           setError(msg);
         }
       } finally {
@@ -268,9 +203,7 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
   const cancelAiQuery = useCallback(() => {
     abortRef.current?.abort();
     setIsLoading(false);
-    const out = useOutputStore.getState();
-    out.append('[诊断] AI 请求已取消');
-    out.setStatus('done');
+    useOutputStore.getState().setStatus('done');
   }, []);
 
   const clearError = useCallback(() => setError(null), []);

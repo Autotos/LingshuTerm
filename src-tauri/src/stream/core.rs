@@ -151,13 +151,26 @@ impl UnifiedStreamCore {
         let raw = String::from_utf8_lossy(chunk).to_string();
         let data = sanitize_output(raw);
         if !data.is_empty() {
-            let _ = app.emit(
-                "session-event",
-                &SessionEvent::Output {
-                    session_id: session_id.to_string(),
-                    data,
-                },
-            );
+            // Strip lines containing internal CWD query markers.
+            // Must preserve all newlines (\n, \r\n) — the terminal relies on
+            // them for correct line rendering.  Do NOT trim the result.
+            let filtered = if data.contains("__CWD_") {
+                data.lines()
+                    .filter(|line| !line.contains("__CWD_"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                data
+            };
+            if !filtered.is_empty() {
+                let _ = app.emit(
+                    "session-event",
+                    &SessionEvent::Output {
+                        session_id: session_id.to_string(),
+                        data: filtered,
+                    },
+                );
+            }
         }
     }
 

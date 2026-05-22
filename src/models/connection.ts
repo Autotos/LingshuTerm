@@ -124,3 +124,21 @@ export function connectionLabel(config: ConnectionConfig): string {
       return config.shell || 'local';
   }
 }
+
+/** Short label for tab display — host:port only, omitting username. */
+export function connectionShortLabel(config: ConnectionConfig): string {
+  switch (config.protocol) {
+    case 'ssh':
+      return config.port !== 22
+        ? `${config.host}:${config.port}`
+        : config.host;
+    case 'telnet':
+      return config.port !== 23
+        ? `${config.host}:${config.port}`
+        : config.host;
+    case 'serial':
+      return config.portName;
+    case 'local':
+      return config.shell ? config.shell.split(/[/\\]/).pop() || config.shell : 'local';
+  }
+}

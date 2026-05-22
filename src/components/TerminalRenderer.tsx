@@ -57,13 +57,10 @@ export interface TerminalRendererHandle {
   setConnectionReady: () => void;
   focus: () => void;
   getCols: () => number;
-  /** Register a visual separator line at the current cursor position. */
+  wake: () => void;
   registerSeparator: () => void;
-  /** Get the current absolute buffer line number (for tracking task blocks). */
   getCurrentLine: () => number;
-  /** Register a decoration at the given buffer line. Returns decoration ID. */
   registerLineDecoration: (lineNum: number, height: number, color: string) => number | undefined;
-  /** Dispose a decoration by ID. */
   disposeDecoration: (id: number) => void;
 }
 
@@ -277,7 +274,7 @@ export const TerminalRenderer = forwardRef<TerminalRendererHandle, TerminalRende
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
     const [frozen, setFrozen] = useState(false);
 
-    const { terminal, terminalRef, fit, clear, getSelection, setConnectionReady } = useTerminal({
+    const { terminal, terminalRef, fit, clear, getSelection, setConnectionReady, wake } = useTerminal({
       containerRef,
       sessionId,
     });
@@ -343,14 +340,11 @@ export const TerminalRenderer = forwardRef<TerminalRendererHandle, TerminalRende
       return () => window.removeEventListener('keydown', onKey);
     }, []);
 
-    // Fit when becoming visible — size the terminal before any output arrives.
-    // Focus is deferred to UnifiedSessionPanel.handleConnectionReady which
-    // fires after the PTY is connected and the DOM is stable.
+    // Fit when becoming visible — container dimensions changed from offscreen.
+    // WebGL context is preserved (terminals use absolute positioning, not display:none).
     useEffect(() => {
       if (!isVisible || !terminal) return;
-      const timer = setTimeout(() => {
-        fit();
-      }, 80);
+      const timer = setTimeout(() => fit(), 80);
       return () => clearTimeout(timer);
     }, [isVisible, terminal, fit]);
 
@@ -375,6 +369,7 @@ export const TerminalRenderer = forwardRef<TerminalRendererHandle, TerminalRende
         fit: () => fit(),
         setConnectionReady: () => setConnectionReady(),
         focus: () => focus(),
+        wake: () => wake(),
         getCols: () => terminalRef.current?.cols ?? 80,
         getCurrentLine: () => {
           const t = terminalRef.current;
@@ -423,7 +418,7 @@ export const TerminalRenderer = forwardRef<TerminalRendererHandle, TerminalRende
           decosRef.current.delete(id);
         },
       }),
-      [clear, getSelection, fit, setConnectionReady, focus],
+      [clear, getSelection, fit, setConnectionReady, focus, wake],
     );
 
     // ── Right-click menu ──

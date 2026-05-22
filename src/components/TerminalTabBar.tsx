@@ -4,6 +4,7 @@ import { X, Plus, Circle, ChevronDown } from 'lucide-react';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
 import type { TerminalInstance } from '@/models/session';
+import { connectionLabel } from '@/models/connection';
 
 interface TerminalTabBarProps {
   sessionId: string | null;
@@ -11,16 +12,43 @@ interface TerminalTabBarProps {
 
 const ADD_BTN_WIDTH = 36;
 const MORE_BTN_WIDTH = 38;
+// Tab: border(1) + padding(24) + circle-icon(16) + gap(6) + close-btn(16) + inner-gaps(4)
+const TAB_FIXED_WIDTH = 1 + 24 + 16 + 6 + 16 + 4; // 67px
+// CJK chars ≈ 11px, ASCII ≈ 6.5px at text-[11px] monospace
+const CJK_CHAR_W = 11;
+const ASCII_CHAR_W = 6.5;
+
+/** Estimate rendered width of a tab title string in pixels. */
+function estimateTitleWidth(title: string): number {
+  let w = 0;
+  for (const ch of title) {
+    const code = ch.codePointAt(0) ?? 0;
+    // CJK Unified Ideographs + full-width forms + kana
+    if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3000 && code <= 0x303F) ||
+        (code >= 0xFF00 && code <= 0xFFEF) || (code >= 0x3040 && code <= 0x30FF) ||
+        (code >= 0xAC00 && code <= 0xD7AF)) {
+      w += CJK_CHAR_W;
+    } else {
+      w += ASCII_CHAR_W;
+    }
+  }
+  return Math.ceil(w);
+}
+
+function estimateTabWidth(title: string): number {
+  return TAB_FIXED_WIDTH + estimateTitleWidth(title);
+}
 
 /**
  * Horizontal tab bar with overflow dropdown.
- * Measures actual tab widths via ResizeObserver on a hidden measure element.
- * Overflow tabs go into a portal-rendered dropdown (avoids overflow:hidden clipping).
+ * Uses deterministic character-width estimation (not DOM measurement which
+ * returns 0 for hidden tabs). ResizeObserver still triggers recalculation
+ * on container resize, but the widths come from the estimation formula.
  */
 export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
   const sessions = useSessionStore((s) => s.sessions);
   const setActiveTerminalIndex = useSessionStore((s) => s.setActiveTerminalIndex);
-  const moveTerminal = useSessionStore((s) => s.moveTerminal);
+  const cycleTerminalIntoView = useSessionStore((s) => s.cycleTerminalIntoView);
   const removeTerminal = useSessionStore((s) => s.removeTerminal);
   const toggleTerminalLogging = useSessionStore((s) => s.toggleTerminalLogging);
   const openTerminalModal = useUiStore((s) => s.openTerminalModal);
@@ -33,67 +61,77 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const moreBtnRef = useRef<HTMLButtonElement>(null);
-  const tabRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
-  // ── Measure actual tab widths and compute visible count ──
-  useEffect(() => {
+  // ── Compute visible tab count from deterministic width estimation ──
+  const computeVisibleCount = useCallback(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || terminals.length === 0) return;
+    const containerWidth = el.clientWidth;
+    if (containerWidth === 0) return;
 
-    const calc = () => {
-      const containerWidth = el.clientWidth;
-      if (containerWidth === 0) return;
+    // How many tabs fit
+    const avail = containerWidth - ADD_BTN_WIDTH;
+    let used = 0;
+    let count = 0;
+    for (let i = 0; i < terminals.length; i++) {
+      const w = estimateTabWidth(terminals[i].title);
+      if (used + w <= avail) {
+        used += w;
+        count++;
+      } else {
+        // If this is the last tab and it fits with Add button only (no need for More btn)
+        if (i === terminals.length - 1 && used + w <= containerWidth - ADD_BTN_WIDTH) {
+          // Actually the Add button is always there, re-check
+        }
+        break;
+      }
+    }
 
-      let used = 0;
-      let count = 0;
-
+    // If not all fit, need room for More button
+    if (count < terminals.length) {
+      const availWithMore = containerWidth - ADD_BTN_WIDTH - MORE_BTN_WIDTH;
+      used = 0;
+      count = 0;
       for (let i = 0; i < terminals.length; i++) {
-        const tabEl = tabRefs.current.get(i);
-        const tabWidth = tabEl ? tabEl.offsetWidth : 0;
-        const need = tabWidth + (i === terminals.length - 1 ? ADD_BTN_WIDTH : 0);
-        if (used + need <= containerWidth - (i < terminals.length - 1 ? 0 : 0)) {
-          used += tabWidth;
+        const w = estimateTabWidth(terminals[i].title);
+        if (used + w <= availWithMore) {
+          used += w;
           count++;
         } else {
-          // Check if this tab + More button + Add button fits
-          if (used + MORE_BTN_WIDTH + ADD_BTN_WIDTH <= containerWidth) {
-            break;
-          }
-          // Need to make room for More button by reducing visible count
-          while (count > 0 && used + MORE_BTN_WIDTH + ADD_BTN_WIDTH > containerWidth) {
-            count--;
-            const removedEl = tabRefs.current.get(count);
-            used -= removedEl ? removedEl.offsetWidth : 0;
-          }
           break;
         }
       }
+    }
 
-      if (count === 0 && terminals.length > 0) count = 1; // show at least 1
-      setVisibleCount(Math.min(count, terminals.length));
-    };
+    if (count === 0 && terminals.length > 0) count = 1;
+    setVisibleCount(Math.min(count, terminals.length));
+  }, [terminals]);
 
-    // Delay initial calc to let DOM paint
-    const timer = setTimeout(calc, 0);
-    const ro = new ResizeObserver(() => calc());
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const timer = setTimeout(computeVisibleCount, 0);
+    const ro = new ResizeObserver(() => computeVisibleCount());
     ro.observe(el);
-    return () => {
-      clearTimeout(timer);
-      ro.disconnect();
-    };
-  }, [terminals.length]);
+    return () => { clearTimeout(timer); ro.disconnect(); };
+  }, [computeVisibleCount]);
+
+  const dropdownId = `tab-dropdown-${sessionId}`;
 
   // ── Close dropdown on outside click ──
   useEffect(() => {
     if (!dropdownOpen) return;
     const handler = (e: MouseEvent) => {
+      // Don't close if clicking the toggle button OR inside the dropdown portal
       if (moreBtnRef.current?.contains(e.target as Node)) return;
+      const dropdownEl = document.getElementById(dropdownId);
+      if (dropdownEl?.contains(e.target as Node)) return;
       setDropdownOpen(false);
     };
-    // Use capture phase so it fires before the toggle button's stopPropagation
-    document.addEventListener('click', handler, true);
-    return () => document.removeEventListener('click', handler, true);
-  }, [dropdownOpen]);
+    // Bubble phase — won't interfere with dropdown item onClick handlers
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [dropdownOpen, dropdownId]);
 
   const handleAdd = useCallback(() => {
     if (sessionId) openTerminalModal(sessionId);
@@ -106,26 +144,16 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
 
   const handleSelectHidden = useCallback((clickedIdx: number) => {
     if (!sessionId) return;
-    // Circular queue swap: move the clicked hidden tab to the last visible position.
-    // The tab currently at the last visible position shifts right into the hidden zone.
     const lastVisibleIdx = Math.max(0, visibleCount - 1);
-    if (clickedIdx !== lastVisibleIdx) {
-      moveTerminal(sessionId, clickedIdx, lastVisibleIdx);
-    }
-    // After the move, the clicked tab is now at `lastVisibleIdx`
-    setActiveTerminalIndex(sessionId, lastVisibleIdx);
+    // Single atomic operation: move + activate in one store update
+    cycleTerminalIntoView(sessionId, clickedIdx, lastVisibleIdx);
     setDropdownOpen(false);
-  }, [sessionId, visibleCount, moveTerminal, setActiveTerminalIndex]);
+  }, [sessionId, visibleCount, cycleTerminalIntoView]);
 
   if (!sessionId) return null;
 
   const hiddenTabs = terminals.slice(visibleCount);
   const activeInHidden = activeIndex >= visibleCount && hiddenTabs.length > 0;
-
-  const registerTabRef = (idx: number) => (el: HTMLDivElement | null) => {
-    if (el) tabRefs.current.set(idx, el);
-    else tabRefs.current.delete(idx);
-  };
 
   return (
     <div
@@ -139,7 +167,6 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
         return (
           <div
             key={term.id}
-            ref={registerTabRef(idx)}
             onClick={isVisible ? () => setActiveTerminalIndex(sessionId, idx) : undefined}
             className={`group flex items-center gap-1.5 h-full px-3 text-[11px] whitespace-nowrap border-r border-[var(--border)] transition-colors flex-shrink-0 ${
               !isVisible ? 'hidden' : 'cursor-pointer'
@@ -168,7 +195,12 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
               />
             </button>
 
-            <span className="truncate max-w-[160px]">{term.title}</span>
+            <span
+              className="truncate max-w-[120px]"
+              title={term.config ? connectionLabel(term.config) : term.title}
+            >
+              {term.title}
+            </span>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -221,6 +253,7 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
       {/* Portal dropdown — rendered to body to avoid overflow:hidden clipping */}
       {dropdownOpen && hiddenTabs.length > 0 && createPortal(
         <div
+          id={dropdownId}
           className="fixed z-[9999] w-56 max-h-64 overflow-y-auto bg-[var(--deep)] border border-[var(--border)] rounded shadow-lg"
           style={{
             top: moreBtnRef.current
@@ -254,7 +287,12 @@ export function TerminalTabBar({ sessionId }: TerminalTabBarProps) {
                       : 'text-[var(--text-4)]'
                   }`}
                 />
-                <span className="truncate flex-1">{term.title}</span>
+                <span
+                  className="truncate flex-1"
+                  title={term.config ? connectionLabel(term.config) : term.title}
+                >
+                  {term.title}
+                </span>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

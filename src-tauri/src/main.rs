@@ -39,6 +39,7 @@ fn main() {
             // Unified session creation (dispatches to PtyManager or ConnectionManager)
             session_commands::create_session,
             session_commands::list_local_shells,
+            session_commands::query_server_stats,
             // PTY commands (write / resize / destroy / block)
             commands::write_to_terminal,
             commands::get_terminal_cwd,
