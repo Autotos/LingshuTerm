@@ -278,3 +278,35 @@ kbd {
   background-size: 200% 100%;
   animation: ai-shimmer 1.5s ease-in-out infinite;
 }
+
+/* ═══════════════════════════════════════════
+   StatusBar tooltips
+   ═══════════════════════════════════════════ */
+
+.stat-item {
+  position: relative;
+  cursor: default;
+}
+
+.stat-label {
+  color: var(--text-4);
+}
+
+.stat-value {
+  color: var(--text-3);
+}
+
+.stat-tooltip {
+  position: fixed;
+  background: var(--raised);
+  border: 1px solid var(--border-hi);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--text-2);
+  z-index: 99999;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}

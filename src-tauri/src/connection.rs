@@ -202,9 +202,9 @@ impl ConnectionManager {
             .ok_or_else(|| anyhow::anyhow!("SSH handle not found for: {}", session_id))?;
 
         // Pure-shell stats command — no python3 dependency.
-        // Collects CPU / memory / disk / users / network bytes in one JSON line.
-        let cmd = r#"cpu=$(cat /proc/stat 2>/dev/null|head -1|awk '{printf "%.1f",100-($5*100/($2+$3+$4+$5+$6+$7+$8))}');cpu=${cpu:-0};mem=$(free -m 2>/dev/null|awk '/Mem:/{printf "%s,%s",$3,$2}');disk=$(df -h / 2>/dev/null|tail -1|awk '{printf "%s,%s",$3,$2}');users=$(who -q 2>/dev/null|tail -1|grep -oP '[0-9]+');users=${users:-0};rx=$(cat /sys/class/net/*/statistics/rx_bytes 2>/dev/null|paste -sd+|bc 2>/dev/null);rx=${rx:-0};tx=$(cat /sys/class/net/*/statistics/tx_bytes 2>/dev/null|paste -sd+|bc 2>/dev/null);tx=${tx:-0};echo "{\"cpu\":$cpu,\"mem\":\"$mem\",\"disk\":\"$disk\",\"users\":\"$users\",\"rx\":$rx,\"tx\":$tx}"
-"#;
+        // Collects CPU / memory / disk / users / network bytes with rich detail.
+        // Single-line format for maximum SSH server compatibility.
+        let cmd = r#"cpu=$(cat /proc/stat 2>/dev/null|head -1|awk '{t=$2+$3+$4+$5+$6+$7+$8;if(t>0)printf "%.1f",100-($5*100/t);else print "0"}');cpu=${cpu:-0};cpu_user=$(cat /proc/stat 2>/dev/null|head -1|awk '{t=$2+$3+$4+$5+$6+$7+$8;if(t>0)printf "%.1f",($2+$3)*100/t;else print "0"}');cpu_user=${cpu_user:-0};cpu_sys=$(cat /proc/stat 2>/dev/null|head -1|awk '{t=$2+$3+$4+$5+$6+$7+$8;if(t>0)printf "%.1f",($4+$7+$8)*100/t;else print "0"}');cpu_sys=${cpu_sys:-0};cpu_idle=$(cat /proc/stat 2>/dev/null|head -1|awk '{t=$2+$3+$4+$5+$6+$7+$8;if(t>0)printf "%.1f",$5*100/t;else print "0"}');cpu_idle=${cpu_idle:-0};cpu_count=$(nproc 2>/dev/null||echo 0);load_avg=$(cat /proc/loadavg 2>/dev/null|awk '{printf "%s,%s,%s",$1,$2,$3}');load_avg=${load_avg:-0,0,0};uptime_sec=$(cat /proc/uptime 2>/dev/null|awk '{print int($1)}');uptime_sec=${uptime_sec:-0};mem_t=$(free -m 2>/dev/null|awk '/Mem:/{print $2}');mem_t=${mem_t:-0};mem_u=$(free -m 2>/dev/null|awk '/Mem:/{print $3}');mem_u=${mem_u:-0};mem_free=$(free -m 2>/dev/null|awk '/Mem:/{print $4}');mem_free=${mem_free:-0};mem_buf=$(free -m 2>/dev/null|awk '/Mem:/{print $5}');mem_buf=${mem_buf:-0};mem_cache=$(free -m 2>/dev/null|awk '/Mem:/{print $6}');mem_cache=${mem_cache:-0};dr_dev=$(df -h / 2>/dev/null|tail -1|awk '{print $1}');dr_dev=${dr_dev:-};dr_t=$(df -h / 2>/dev/null|tail -1|awk '{print $2}');dr_t=${dr_t:-0};dr_u=$(df -h / 2>/dev/null|tail -1|awk '{print $3}');dr_u=${dr_u:-0};dr_avail=$(df -h / 2>/dev/null|tail -1|awk '{print $4}');dr_avail=${dr_avail:-0};dr_pct=$(df -h / 2>/dev/null|tail -1|awk '{print $5}');dr_pct=${dr_pct:-0};disk_parts="[$(df -h 2>/dev/null|awk 'NR>1&&/^\/dev\//{gsub(/%/,"",$5);printf "%s|%s|%s|%s|%s|%s\n",$5,$1,$2,$3,$4,$6}'|sort -t'|' -k1 -rn|head -3|awk -F'|' '{if(NR>1)printf ",";printf "{\"mount\":\"%s\",\"dev\":\"%s\",\"total\":\"%s\",\"used\":\"%s\",\"avail\":\"%s\",\"pct\":\"%s%%\"}",$6,$2,$3,$4,$5,$1}')]";ifaces=$(ls /sys/class/net/ 2>/dev/null|grep -v lo|paste -sd, -);ifaces=${ifaces:-};rx_total=0;tx_total=0;for f in /sys/class/net/*/statistics/rx_bytes;do [ -f "$f" ]&&rx_total=$((rx_total+$(cat "$f" 2>/dev/null||echo 0)));done 2>/dev/null;for f in /sys/class/net/*/statistics/tx_bytes;do [ -f "$f" ]&&tx_total=$((tx_total+$(cat "$f" 2>/dev/null||echo 0)));done 2>/dev/null;user_json="[$(who 2>/dev/null|awk '{gsub(/\\/,"\\\\");gsub(/"/,"\\\"");if(NR>1)printf ",";printf "{\"name\":\"%s\",\"tty\":\"%s\",\"time\":\"%s %s\"}",$1,$2,$3,$4}')]";user_count=$(who 2>/dev/null|awk '{print $1}'|sort -u|wc -l);user_count=${user_count:-0};echo "{\"cpu\":{\"total\":$cpu,\"user\":$cpu_user,\"system\":$cpu_sys,\"idle\":$cpu_idle},\"cpu_count\":$cpu_count,\"load_avg\":\"$load_avg\",\"uptime\":$uptime_sec,\"mem\":{\"total\":\"$mem_t\",\"used\":\"$mem_u\",\"free\":\"$mem_free\",\"buffers\":\"$mem_buf\",\"cached\":\"$mem_cache\"},\"disk_root\":{\"dev\":\"$dr_dev\",\"total\":\"$dr_t\",\"used\":\"$dr_u\",\"avail\":\"$dr_avail\",\"pct\":\"$dr_pct\"},\"disk_parts\":$disk_parts,\"net\":{\"ifaces\":\"$ifaces\",\"rx\":$rx_total,\"tx\":$tx_total},\"users\":{\"count\":$user_count,\"list\":$user_json}}""#;
 
         // Open a fresh exec channel — completely isolated from the user's PTY.
         let mut channel = handle
@@ -248,7 +248,15 @@ impl ConnectionManager {
             .lines()
             .filter(|l| l.starts_with('{') && l.contains("\"cpu\""))
             .last()
-            .ok_or_else(|| anyhow::anyhow!("No valid stats JSON in exec output"))?;
+            .ok_or_else(|| {
+                tracing::warn!(
+                    session_id = %session_id,
+                    output_len = output.len(),
+                    output_preview = %if output.len() > 500 { &output[..500] } else { &output },
+                    "No valid stats JSON in exec output"
+                );
+                anyhow::anyhow!("No valid stats JSON in exec output")
+            })?;
 
         Ok(json.trim().to_string())
     }
