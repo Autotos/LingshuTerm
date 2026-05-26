@@ -14,6 +14,7 @@ import { SessionManager } from './SessionManager';
 import { LogViewer } from './LogViewer';
 import { ServerManagementModal } from './ServerManagementModal';
 import { StatusBar } from './StatusBar';
+import { ConfirmDialog } from './ConfirmDialog';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -59,8 +60,14 @@ export function Layout() {
 
   // ── Hooks for BottomInputArea (use backend connection ID) ──
   const { executeCommand, isExecuting } = useBlockSession({ sessionId: activeConnectionId });
-  const { submitAiQuery, cancelAiQuery, isLoading: isAiLoading, error: aiError, clearError: clearAiError } =
-    useAiSubmit({ sessionId: activeConnectionId });
+  const {
+    submitAiQuery,
+    cancelAiQuery,
+    isLoading: isAiLoading,
+    error: aiError,
+    clearError: clearAiError,
+    confirmDialog,
+  } = useAiSubmit({ sessionId: activeConnectionId });
   useTaskQueue({ sessionId: activeConnectionId });
 
   const sessionLabel = activeSessionId
@@ -182,6 +189,16 @@ export function Layout() {
       <SessionManager />
       <LogViewer isOpen={logsOpen} onClose={() => setLogsOpen(false)} />
       <ServerManagementModal isOpen={serversOpen} onClose={() => setServersOpen(false)} />
+
+      {/* Harness permission confirm dialog */}
+      <ConfirmDialog
+        open={confirmDialog.open}
+        command={confirmDialog.step?.command ?? ''}
+        description={confirmDialog.step?.description ?? ''}
+        reason={confirmDialog.guardResult?.auditEntry?.reason}
+        onChoose={confirmDialog.onChoose}
+        onDismiss={confirmDialog.onDismiss}
+      />
     </div>
   );
 }

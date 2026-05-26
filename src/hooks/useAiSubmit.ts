@@ -4,14 +4,16 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useOutputStore } from '@/stores/outputStore';
-import { nlToTasks, nlToAction, resolveProvider } from '@/lib/aiService';
-import type { ChatMessage } from '@/lib/aiService';
+import { nlToAction, resolveProvider } from '@/lib/aiService';
+import type { AiTaskStep, ChatMessage } from '@/lib/aiService';
 import { assemblePrompt, appendShortTerm } from '@/lib/memoryService';
 import {
   detectTerminalCreateIntent,
   actionToConnectionConfig,
 } from '@/lib/terminalAction';
 import { connectionLabel, connectionShortLabel } from '@/models/connection';
+import { runPipeline } from '@/lib/harness/harnessPipeline';
+import type { GuardResult } from '@/lib/harness/types';
 
 interface UseAiSubmitOptions {
   sessionId: string | null;
@@ -23,6 +25,14 @@ interface UseAiSubmitReturn {
   isLoading: boolean;
   error: string | null;
   clearError: () => void;
+  /** Harness confirm dialog props — render <ConfirmDialog> in parent */
+  confirmDialog: {
+    open: boolean;
+    step: AiTaskStep | null;
+    guardResult: GuardResult | null;
+    onChoose: (choice: 'deny' | 'allow-once' | 'allow-all') => void;
+    onDismiss: () => void;
+  };
 }
 
 function resolveSessionName(connectionId: string): string {
@@ -95,6 +105,24 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // Harness confirm dialog state
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmStep, setConfirmStep] = useState<AiTaskStep | null>(null);
+  const [confirmGuard, setConfirmGuard] = useState<GuardResult | null>(null);
+  const confirmResolveRef = useRef<((approved: boolean) => void) | null>(null);
+  const allowAllRef = useRef(false);
+
+  const handleConfirmChoice = useCallback((choice: 'deny' | 'allow-once' | 'allow-all') => {
+    if (choice === 'allow-all') {
+      allowAllRef.current = true;
+    }
+    setConfirmOpen(false);
+    setConfirmStep(null);
+    setConfirmGuard(null);
+    confirmResolveRef.current?.(choice !== 'deny');
+    confirmResolveRef.current = null;
+  }, []);
+
   const submitAiQuery = useCallback(
     async (query: string) => {
       if (isLoading) return;
@@ -125,7 +153,7 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
           return;
         }
 
-        // ── Phase 2: LLM ──
+        // ── Phase 2: LLM + Harness Pipeline ──
         if (!provider.baseUrl) {
           out.append('AI API 未配置，请在设置中配置 AI 服务');
           out.setStatus('done');
@@ -161,29 +189,59 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
           if (ok) return;
         }
 
-        // Fallback: task-step parsing
-        const steps = await nlToTasks(config, query, controller.signal, preMessages);
+        // Fallback: Harness Pipeline (single-turn planner + middleware)
+        const harnessConfig = useSettingsStore.getState().settings.harness;
 
-        if (steps.length === 0) {
-          throw new Error('AI returned no executable commands');
+        const result = await runPipeline(
+          query,
+          sessionId ?? memoryId,
+          {
+            signal: controller.signal,
+            onProgress: (status) => out.append(status),
+            onConfirm: async (step, guardResult) => {
+              if (allowAllRef.current) return true;
+              return new Promise<boolean>((resolve) => {
+                confirmResolveRef.current = resolve;
+                setConfirmStep(step);
+                setConfirmGuard(guardResult);
+                setConfirmOpen(true);
+              });
+            },
+            onExecuteStart: (step) => {
+              out.append(`  $ ${step.command}  — ${step.description}`);
+            },
+            onExecuteEnd: (_step, _exitCode) => {
+              // Block event system handles actual exit code tracking
+            },
+          },
+          harnessConfig,
+        );
+
+        // Display results
+        out.append(result.summary);
+        if (result.finalStatus === 'denied') {
+          out.append('任务被安全策略拒绝');
+          out.setStatus('error');
+        } else if (result.finalStatus === 'failed') {
+          out.append('任务执行或验证失败');
+          out.setStatus('error');
+        } else {
+          out.setStatus('done');
         }
 
-        for (const s of steps) {
-          out.append(`  $ ${s.command}  — ${s.description}`);
-        }
-        out.setStatus('done');
-
+        // Save to memory
         appendShortTerm(memoryId, [
           { role: 'user', content: query, ts: Date.now() },
           {
             role: 'assistant',
-            content: steps.map((s) => `${s.description}: ${s.command}`).join('\n'),
+            content: result.steps.map((s) => `${s.description}: ${s.command}`).join('\n'),
             ts: Date.now(),
           },
         ]).catch(() => {});
 
-        if (sessionId) {
-          useTaskStore.getState().createGroup(sessionId, query, steps);
+        // Create task group
+        if (sessionId && result.steps.length > 0) {
+          useTaskStore.getState().createGroup(sessionId, query, result.steps);
           useUiStore.getState().setSidebarTab('tasks');
         }
       } catch (err) {
@@ -208,5 +266,22 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { submitAiQuery, cancelAiQuery, isLoading, error, clearError };
+  return {
+    submitAiQuery,
+    cancelAiQuery,
+    isLoading,
+    error,
+    clearError,
+    confirmDialog: {
+      open: confirmOpen,
+      step: confirmStep,
+      guardResult: confirmGuard,
+      onChoose: handleConfirmChoice,
+      onDismiss: () => {
+        setConfirmOpen(false);
+        confirmResolveRef.current?.(false);
+        confirmResolveRef.current = null;
+      },
+    },
+  };
 }

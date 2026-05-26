@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import type { AiConfig, AiProviderConfig } from '@/lib/aiService';
 import { defaultAiConfig, AI_PRESETS } from '@/lib/aiService';
+import type { HarnessConfig } from '@/lib/harness/types';
+import { DEFAULT_HARNESS_CONFIG } from '@/lib/harness/defaults';
 
 interface AppSettings {
   shell: { path: string; args: string[] };
@@ -14,6 +16,7 @@ interface AppSettings {
     defaultRows: number;
   };
   ai: AiConfig;
+  harness: HarnessConfig;
   logging: {
     enabled: boolean;
     logPath: string;
@@ -26,6 +29,7 @@ interface SettingsState {
   loaded: boolean;
   updateSettings: (patch: Partial<AppSettings>) => void;
   updateAiSettings: (patch: Partial<AiConfig>) => void;
+  updateHarnessSettings: (patch: Partial<HarnessConfig>) => void;
   updateProvider: (providerId: string, patch: Partial<AiProviderConfig>) => void;
   addProvider: (presetKey?: string) => void;
   removeProvider: (providerId: string) => void;
@@ -44,6 +48,7 @@ const defaultSettings: AppSettings = {
     defaultRows: 24,
   },
   ai: defaultAiConfig,
+  harness: DEFAULT_HARNESS_CONFIG,
   logging: {
     enabled: true,
     logPath: '',
@@ -123,6 +128,12 @@ export const useSettingsStore = create<SettingsState>()((set, get) => {
 
     updateAiSettings: (patch) => {
       const next = { ...get().settings, ai: { ...get().settings.ai, ...patch } };
+      scheduleSave(next);
+      set({ settings: next });
+    },
+
+    updateHarnessSettings: (patch) => {
+      const next = { ...get().settings, harness: { ...get().settings.harness, ...patch } };
       scheduleSave(next);
       set({ settings: next });
     },

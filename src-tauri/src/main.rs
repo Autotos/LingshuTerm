@@ -6,6 +6,7 @@ use lingshu_term2_lib::{
     commands,
     connection::ConnectionManager,
     connection_commands,
+    harness_commands,
     logger,
     persistence,
     server_manager,
@@ -97,6 +98,12 @@ fn main() {
             sftp::sftp_create_file,
             // AI proxy (CORS bypass)
             ai_proxy::ai_proxy_request,
+            // Harness middleware
+            harness_commands::read_agents_md,
+            harness_commands::write_agents_md,
+            harness_commands::read_progress_md,
+            harness_commands::write_progress_md,
+            harness_commands::run_verify_cmd,
         ])
         .setup(|app| {
             // 确保工作空间存在
