@@ -13,6 +13,7 @@ pub enum ShellType {
     Bash,
     Zsh,
     PowerShell,
+    Cmd,
     Sh,
     Unknown,
 }
@@ -31,6 +32,8 @@ impl ShellType {
             ShellType::PowerShell
         } else if base == "sh" || base == "sh.exe" {
             ShellType::Sh
+        } else if base.starts_with("cmd") {
+            ShellType::Cmd
         } else {
             ShellType::Unknown
         }
@@ -55,6 +58,16 @@ pub fn wrap_command(shell_type: ShellType, command_id: &str, user_command: &str)
                  {cmd}; \
                  $__ls_rc = $(if ($?) {{ if ($LASTEXITCODE -ne $null) {{ $LASTEXITCODE }} else {{ 0 }} }} else {{ 1 }}); \
                  [Console]::Write([char]27 + ']7701;E;{id};' + $__ls_rc + [char]7)\r\n",
+                id = command_id,
+                cmd = user_command,
+            )
+        }
+        ShellType::Cmd => {
+            // cmd.exe: embed literal ESC (0x1B) and BEL (0x07) bytes so that
+            // echo writes the OSC 7701 markers directly to the console output.
+            // %ERRORLEVEL% captures the exit code of the last command.
+            format!(
+                "echo \x1b]7701;S;{id}\x07 & ({cmd}) & echo \x1b]7701;E;{id};%ERRORLEVEL%\x07\r\n",
                 id = command_id,
                 cmd = user_command,
             )

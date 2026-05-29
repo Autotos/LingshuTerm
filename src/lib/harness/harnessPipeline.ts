@@ -28,14 +28,82 @@ import { DEFAULT_HARNESS_CONFIG } from './defaults';
 export interface PipelineCallbacks {
   /** Called when a command requires user confirmation. Return true to proceed. */
   onConfirm: (step: AiTaskStep, guardResult: GuardResult) => Promise<boolean>;
-  /** Called before each command executes (for UI progress). */
+  /** Called before each command executes. */
   onExecuteStart: (step: AiTaskStep) => void;
-  /** Called after each command finishes (for UI progress). */
-  onExecuteEnd: (step: AiTaskStep, exitCode: number) => void;
+  /** Called after each command finishes. capturedOutput = stdout from the command. */
+  onExecuteEnd: (step: AiTaskStep, exitCode: number, capturedOutput: string) => void;
   /** Called for general status updates. */
   onProgress: (status: string) => void;
   /** AbortSignal for cancellation. */
   signal?: AbortSignal;
+}
+
+/** Result of executing a command and capturing its output */
+interface ExecuteResult {
+  commandId: string;
+  exitCode: number;
+  output: string;
+}
+
+/**
+ * Execute a command and capture its output cleanly.
+ *
+ * Uses the Rust `exec_shell_cmd` Tauri command which spawns a child process
+ * (powershell.exe -NonInteractive on Windows, sh -c on Unix) and returns
+ * stdout+stderr+exit_code directly — completely bypassing the PTY.
+ *
+ * No more echoed script lines, no ANSI noise, no prompt artifacts.
+ */
+async function executeAndCapture(
+  _sessionId: string,
+  command: string,
+  timeoutMs: number,
+): Promise<ExecuteResult> {
+  try {
+    const result: { exit_code: number; stdout: string; stderr: string } =
+      await invoke('exec_shell_cmd', {
+        command,
+        timeoutSecs: Math.ceil(timeoutMs / 1000),
+      });
+
+    const output = (result.stdout || '').trim();
+    const stderr = (result.stderr || '').trim();
+    const combined = [output, stderr].filter(Boolean).join('\n');
+
+    return {
+      commandId: '',
+      exitCode: result.exit_code,
+      output: stripAnsi(combined),
+    };
+  } catch (err) {
+    return {
+      commandId: '',
+      exitCode: -1,
+      output: `执行异常: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/** Strip ANSI escape sequences from captured output. */
+function stripAnsi(text: string): string {
+  return text
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b[()][0-9A-Z]/g, '')
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Resolve the path to PowerShell on Windows via the existing shell detection. */
+async function resolveWindowsPowerShell(): Promise<string> {
+  try {
+    const shells: { kind: string; label: string; path: string }[] = await invoke('list_local_shells');
+    const ps = shells.find((s) => s.kind === 'powershell');
+    if (ps) return ps.path;
+  } catch { /* fall through to default */ }
+  // Last-resort fallback — works on all modern Windows installations
+  return 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 }
 
 // ─── Main Pipeline ───────────────────────────────────────────────
@@ -108,6 +176,33 @@ export async function runPipeline(
     return result;
   }
 
+  // ── Resolve execution session: if no terminal is open, create a background local PTY ──
+  let execSessionId = sessionId;
+  const isValidSession = /^(session|ssh|telnet|serial)-\d/.test(execSessionId);
+  if (!isValidSession) {
+    // Pick the right shell for the platform.  On Windows we MUST use PowerShell
+    // because cmd.exe doesn't understand the OSC 7701 wrapper syntax that the
+    // block execution system relies on.
+    const isWindows = navigator.platform?.toLowerCase().startsWith('win') ?? false;
+    const defaultShell = isWindows
+      ? (await resolveWindowsPowerShell())
+      : '';
+
+    try {
+      execSessionId = await invoke<string>('create_session', {
+        config: { protocol: 'local', shell: defaultShell, cwd: undefined },
+      });
+      // Wait for the shell to initialise.  With exec_shell_cmd we spawn
+      // a fresh child process for each command, so we just need the PTY
+      // session to be alive — not interactive-ready.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1500));
+    } catch {
+      result.finalStatus = 'failed';
+      result.summary = '无法创建后台执行会话';
+      return result;
+    }
+  }
+
   // ── Phase 3: Permission Guard + Execution ──
   for (const step of steps) {
     if (signal?.aborted) break;
@@ -130,19 +225,18 @@ export async function runPipeline(
       }
     }
 
-    // Execute
+    // Execute and capture output
     onExecuteStart(step);
     try {
-      // Use the existing execute_block_command Tauri command
-      await invoke('execute_block_command', {
-        sessionId,
-        command: step.command,
-      });
-      onExecuteEnd(step, 0); // Block system tracks actual exit code via events
-      onProgress(`完成: ${step.command}`);
+      const execResult = await executeAndCapture(execSessionId, step.command, 30_000);
+      const capturedOutput = execResult.output.trim();
+      onExecuteEnd(step, execResult.exitCode, capturedOutput);
+      if (execResult.exitCode !== 0) {
+        result.finalStatus = 'failed';
+      }
     } catch (err) {
-      onExecuteEnd(step, -1);
-      onProgress(`执行失败: ${step.command}`);
+      onExecuteEnd(step, -1, '');
+      result.finalStatus = 'failed';
     }
   }
 
@@ -171,11 +265,25 @@ export async function runPipeline(
   }
 
   // ── Phase 5: Verification ──
-  if (injection.verifyCommands.length > 0 && result.finalStatus !== 'denied') {
+  // Skip verification for read-only queries — only verify when commands
+  // might have side effects (modify files, install packages, build, git ops)
+  const isReadOnly = steps.every((s) => {
+    const cmd = s.command;
+    return (
+      // Query/read commands
+      /^(Get-ChildItem|ls|dir|cat|type|gc |grep|find|Select-String|head|tail|wc|echo|Write-Output|printf|du|df|free|ps|whoami|date|uname|which|where|whereis|stat|file |npm (list|view|outdated)|cargo search|git (status|log|diff|branch|remote)|winget list|choco list|pip (list|show|freeze)|conda list)\b/i.test(cmd)
+      // Commands that only read/query
+      || /\b(Get-|\.Count|\.Length|Measure-Object)\b/.test(cmd)
+      // Explicitly NOT modify commands
+      && !/\b(rm |mv |cp |mkdir|touch|New-Item|Set-Content|Out-File|>|>>|\binstall\b|\buninstall\b|\bpublish\b|\bbuild\b|git (push|commit|merge|rebase|add)|npm (install|uninstall|update|publish)|pip (install|uninstall)|cargo (install|publish|update)|chmod|chown)\b/i.test(cmd)
+    );
+  });
+
+  if (injection.verifyCommands.length > 0 && result.finalStatus !== 'denied' && !isReadOnly) {
     onProgress('正在运行验收命令...');
 
     result.verifyResults = await runVerification({
-      sessionId,
+      sessionId: execSessionId,
       commands: injection.verifyCommands,
       maxRetries: config.maxVerifyRetries,
       onProgress,

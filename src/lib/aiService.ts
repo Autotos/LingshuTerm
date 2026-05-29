@@ -61,15 +61,16 @@ export interface PresetDef {
 }
 
 export const AI_PRESETS: Record<string, PresetDef> = {
-  dashscope:  { label: '百炼 (DashScope)',   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-turbo' },
-  ark:        { label: '火山方舟 (Ark)',      baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',         defaultModel: 'doubao-pro-32k' },
-  zhipu:      { label: '智谱 (GLM)',          baseUrl: 'https://open.bigmodel.cn/api/paas/v4',             defaultModel: 'glm-4-flash' },
-  minimax:    { label: 'MiniMax',             baseUrl: 'https://api.minimax.chat/v1',                      defaultModel: 'abab6.5s-chat' },
-  moonshot:   { label: 'Kimi (Moonshot)',     baseUrl: 'https://api.moonshot.cn/v1',                       defaultModel: 'moonshot-v1-8k' },
-  openai:     { label: 'OpenAI',              baseUrl: 'https://api.openai.com/v1',                        defaultModel: 'gpt-4o-mini' },
-  ollama:     { label: 'Ollama (本地)',        baseUrl: 'http://localhost:11434/v1',                        defaultModel: 'qwen2.5:7b' },
-  lmstudio:   { label: 'LM Studio (本地)',    baseUrl: 'http://localhost:1234/v1',                         defaultModel: 'default' },
-  llamacpp:   { label: 'llama.cpp (本地)',     baseUrl: 'http://localhost:8080/v1',                         defaultModel: 'default' },
+  dashscope:       { label: '百炼 (DashScope) · 标准',     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-turbo' },
+  dashscope_token: { label: '百炼 (DashScope) · Token Plan', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-plus' },
+  ark:             { label: '火山方舟 (Ark)',                 baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',         defaultModel: 'doubao-pro-32k' },
+  zhipu:           { label: '智谱 (GLM)',                     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',             defaultModel: 'glm-4-flash' },
+  minimax:         { label: 'MiniMax',                        baseUrl: 'https://api.minimax.chat/v1',                      defaultModel: 'abab6.5s-chat' },
+  moonshot:        { label: 'Kimi (Moonshot)',                baseUrl: 'https://api.moonshot.cn/v1',                       defaultModel: 'moonshot-v1-8k' },
+  openai:          { label: 'OpenAI',                         baseUrl: 'https://api.openai.com/v1',                        defaultModel: 'gpt-4o-mini' },
+  ollama:          { label: 'Ollama (本地)',                   baseUrl: 'http://localhost:11434/v1',                        defaultModel: 'qwen2.5:7b' },
+  lmstudio:        { label: 'LM Studio (本地)',               baseUrl: 'http://localhost:1234/v1',                         defaultModel: 'default' },
+  llamacpp:        { label: 'llama.cpp (本地)',                baseUrl: 'http://localhost:8080/v1',                         defaultModel: 'default' },
 };
 
 // ─── Types for API ───────────────────────────────────────────────
@@ -90,6 +91,7 @@ interface ChatCompletionChoice {
 
 interface ChatCompletionResponse {
   choices: ChatCompletionChoice[];
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
 const SYSTEM_PROMPT = `你是一位专业的 Linux/macOS/Windows 运维专家，用户会用自然语言描述他们想要完成的操作任务。
@@ -162,13 +164,28 @@ async function chatCompletion(
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   if (!resp.ok) {
-    throw new Error(`AI API error ${resp.status}: ${resp.body.slice(0, 200)}`);
+    let hint = '';
+    if (resp.status === 401) {
+      hint = '\n→ 检查 API Key 是否正确（去掉首尾空格）。Token Plan 请选择「百炼 · Token Plan」预设。';
+    } else if (resp.status === 403) {
+      hint = '\n→ API Key 无权限访问该模型，检查模型名称或 API Key 配额。';
+    } else if (resp.status === 404) {
+      hint = '\n→ 模型名称可能不正确，Token Plan 建议使用 qwen-plus 或 qwen-turbo。';
+    }
+    throw new Error(`AI API error ${resp.status}: ${resp.body.slice(0, 200)}${hint}`);
   }
 
   const data: ChatCompletionResponse = JSON.parse(resp.body);
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
     throw new Error('AI returned empty response');
+  }
+  // Track token usage
+  if (data.usage) {
+    _lastTokens = {
+      input: data.usage.prompt_tokens,
+      output: data.usage.completion_tokens,
+    };
   }
   return content;
 }
@@ -325,4 +342,27 @@ export async function testConnection(config: AiConfig): Promise<string> {
     { role: 'user', content: 'Reply "ok" if you can read this.' },
   ]);
   return content;
+}
+
+/**
+ * Send a prompt to the LLM and return the raw response text.
+ * Unlike nlToTasks, this does NOT try to parse commands — useful for
+ * formatting, summarisation, or classification tasks.
+ */
+export async function chatRaw(
+  config: AiConfig,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+): Promise<string> {
+  const provider = resolveProvider(config);
+  return chatCompletion(provider, messages, signal);
+}
+
+// ─── Token tracking ──────────────────────────────────────────────
+
+let _lastTokens: { input: number; output: number } | null = null;
+
+/** Get the token usage from the last LLM call. */
+export function getLastTokenUsage(): { input: number; output: number } | null {
+  return _lastTokens;
 }

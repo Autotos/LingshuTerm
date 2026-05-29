@@ -37,12 +37,13 @@ pub async fn ai_proxy_request(req: ProxyRequest) -> Result<ProxyResponse, String
         req.base_url.trim_end_matches('/')
     );
 
+    let api_key = req.api_key.trim();
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
-    if !req.api_key.is_empty() {
+    if !api_key.is_empty() {
         headers.insert(
             "Authorization",
-            format!("Bearer {}", req.api_key).parse::<reqwest::header::HeaderValue>().map_err(|e| e.to_string())?,
+            format!("Bearer {}", api_key).parse::<reqwest::header::HeaderValue>().map_err(|e| e.to_string())?,
         );
     }
 

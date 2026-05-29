@@ -15,6 +15,7 @@ import { LogViewer } from './LogViewer';
 import { ServerManagementModal } from './ServerManagementModal';
 import { StatusBar } from './StatusBar';
 import { ConfirmDialog } from './ConfirmDialog';
+import { Resizer } from './Resizer';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -27,9 +28,20 @@ import { usePersistenceBootstrap } from '@/hooks/usePersistenceBootstrap';
 export function Layout() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const sessions = useSessionStore((s) => s.sessions);
-  const { isEditorVisible, isSftpVisible, toggleEditor, toggleSftp } = useUiStore();
+  const {
+    isEditorVisible,
+    isSftpVisible,
+    toggleEditor,
+    toggleSftp,
+    sidebarWidth,
+    setSidebarWidth,
+    outputHeight,
+    setOutputHeight,
+  } = useUiStore();
   const [logsOpen, setLogsOpen] = useState(false);
   const [serversOpen, setServersOpen] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const outputRef = useRef<HTMLDivElement>(null);
 
   // Reactive selector: re-renders when activeTerminalIndex or terminals change
   const activeConnectionId = useSessionStore((s) => {
@@ -87,7 +99,17 @@ export function Layout() {
       />
 
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        <Sidebar ref={sidebarRef} sidebarWidth={sidebarWidth} />
+
+        {/* Sidebar resizer — vertical dragger */}
+        <Resizer
+          axis="x"
+          currentSize={sidebarWidth}
+          minSize={200}
+          maxSize={500}
+          onResize={setSidebarWidth}
+          targetRef={sidebarRef}
+        />
 
         <main className="flex-1 flex flex-col min-w-0 bg-[var(--void)]">
           {/* ── Terminal tab bar ── */}
@@ -164,8 +186,18 @@ export function Layout() {
             </div>
           </div>
 
+          {/* Output resizer — horizontal dragger */}
+          <Resizer
+            axis="y"
+            currentSize={outputHeight}
+            minSize={100}
+            maxSize={600}
+            onResize={setOutputHeight}
+            targetRef={outputRef}
+          />
+
           {/* Output panel */}
-          <OutputPanel />
+          <OutputPanel ref={outputRef} outputHeight={outputHeight} />
 
           {/* Bottom input bar */}
           <BottomInputArea

@@ -1,5 +1,6 @@
 pub mod ai_proxy;
 pub mod block;
+pub mod exec_shell;
 pub mod harness_commands;
 pub mod commands;
 pub mod connection;

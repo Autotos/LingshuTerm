@@ -4,6 +4,10 @@ export type SidebarTab = 'sessions' | 'tasks';
 
 interface UiState {
   sidebarCollapsed: boolean;
+  /** Current sidebar width in px (when expanded). Default 260, min 200, max 500. */
+  sidebarWidth: number;
+  /** Current output panel height in px (when expanded). Default 200, min 100, max 600. */
+  outputHeight: number;
   /** Whether the right-side editor drawer is open. */
   isEditorVisible: boolean;
   /** Whether the right-side SFTP file explorer is open. */
@@ -19,6 +23,8 @@ interface UiState {
   /** Which session the terminal modal should add the terminal to. */
   terminalModalSessionId: string | null;
   toggleSidebar: () => void;
+  setSidebarWidth: (width: number) => void;
+  setOutputHeight: (height: number) => void;
   toggleEditor: () => void;
   toggleSftp: () => void;
   setSidebarTab: (tab: SidebarTab) => void;
@@ -32,6 +38,8 @@ interface UiState {
 
 export const useUiStore = create<UiState>((set) => ({
   sidebarCollapsed: false,
+  sidebarWidth: 260,
+  outputHeight: 200,
   isEditorVisible: false,
   isSftpVisible: false,
   sidebarTab: 'sessions',
@@ -41,6 +49,8 @@ export const useUiStore = create<UiState>((set) => ({
   terminalModalOpen: false,
   terminalModalSessionId: null,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
+  setSidebarWidth: (width) => set({ sidebarWidth: width }),
+  setOutputHeight: (height) => set({ outputHeight: height }),
   toggleEditor: () => set((s) => ({ isEditorVisible: !s.isEditorVisible })),
   toggleSftp: () => set((s) => ({ isSftpVisible: !s.isSftpVisible })),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),

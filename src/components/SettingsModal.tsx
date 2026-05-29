@@ -1,11 +1,12 @@
 import { useState, useCallback } from 'react';
-import { X, Zap, Terminal, Loader2, CheckCircle2, XCircle, ScrollText, Plus, Trash2 } from 'lucide-react';
+import { X, Zap, Terminal, Loader2, CheckCircle2, XCircle, ScrollText, Plus, Trash2, Sparkles, Eye, EyeOff } from 'lucide-react';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useUiStore } from '@/stores/uiStore';
 import { AI_PRESETS, testConnection, resolveProvider } from '@/lib/aiService';
 import type { AiConfig, AiProviderConfig } from '@/lib/aiService';
+import { SOUL_PRESETS } from '@/lib/harness/defaults';
 
-type SettingsTab = 'ai' | 'terminal' | 'logging';
+type SettingsTab = 'ai' | 'terminal' | 'logging' | 'soul';
 
 export function SettingsModal() {
   const { settingsOpen, setSettingsOpen } = useUiStore();
@@ -31,6 +32,7 @@ export function SettingsModal() {
         <div className="flex gap-1 px-5 pt-3">
           <TabBtn icon={<Zap className="w-3.5 h-3.5" />} label="AI" active={tab === 'ai'} onClick={() => setTab('ai')} />
           <TabBtn icon={<Terminal className="w-3.5 h-3.5" />} label="Terminal" active={tab === 'terminal'} onClick={() => setTab('terminal')} />
+          <TabBtn icon={<Sparkles className="w-3.5 h-3.5" />} label="Personality" active={tab === 'soul'} onClick={() => setTab('soul')} />
           <TabBtn icon={<ScrollText className="w-3.5 h-3.5" />} label="Logging" active={tab === 'logging'} onClick={() => setTab('logging')} />
         </div>
 
@@ -49,6 +51,13 @@ export function SettingsModal() {
               shell={settings.shell}
               onUpdateTerminal={(patch) => updateSettings({ terminal: { ...settings.terminal, ...patch } })}
               onUpdateShell={(patch) => updateSettings({ shell: { ...settings.shell, ...patch } })}
+            />
+          ) : tab === 'soul' ? (
+            <SoulSettings
+              profile={settings.soulProfile}
+              onSelect={(profile) => {
+                useSettingsStore.getState().setSoulProfile(profile);
+              }}
             />
           ) : (
             <LoggingSettings
@@ -96,6 +105,7 @@ function AiSettings({
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [testError, setTestError] = useState('');
   const [showPresets, setShowPresets] = useState(false);
+  const [showKey, setShowKey] = useState(false);
 
   const current = resolveProvider(config);
 
@@ -188,13 +198,26 @@ function AiSettings({
       </Field>
 
       <Field label="API Key">
-        <input
-          type="password"
-          className="settings-input"
-          value={current.apiKey}
-          onChange={(e) => onUpdateProvider(current.id, { apiKey: e.target.value })}
-          placeholder="sk-... (local models can leave empty)"
-        />
+        <div className="relative">
+          <input
+            type={showKey ? 'text' : 'password'}
+            className="settings-input pr-8"
+            maxLength={2048}
+            value={current.apiKey}
+            onChange={(e) => onUpdateProvider(current.id, { apiKey: e.target.value })}
+            placeholder="sk-..."
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={() => setShowKey((v) => !v)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[var(--text-4)] hover:text-[var(--text-2)] transition-colors"
+            title={showKey ? '隐藏' : '显示'}
+          >
+            {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
+        </div>
       </Field>
 
       <Field label="Model">
@@ -260,9 +283,9 @@ function TerminalSettings({
   onUpdateTerminal,
   onUpdateShell,
 }: {
-  terminal: { fontSize: number; fontFamily: string; scrollback: number; autoFit: boolean; defaultColumns: number; defaultRows: number };
+  terminal: { fontSize: number; fontFamily: string; outputFont: string; scrollback: number; autoFit: boolean; defaultColumns: number; defaultRows: number };
   shell: { path: string; args: string[] };
-  onUpdateTerminal: (patch: Partial<{ fontSize: number; fontFamily: string; scrollback: number; autoFit: boolean; defaultColumns: number; defaultRows: number }>) => void;
+  onUpdateTerminal: (patch: Partial<{ fontSize: number; fontFamily: string; outputFont: string; scrollback: number; autoFit: boolean; defaultColumns: number; defaultRows: number }>) => void;
   onUpdateShell: (patch: Partial<{ path: string; args: string[] }>) => void;
 }) {
   return (
@@ -277,12 +300,22 @@ function TerminalSettings({
         />
       </Field>
 
-      <Field label="Font Family">
+      <Field label="Font Family (Terminal)">
         <input
           type="text"
           className="settings-input"
           value={terminal.fontFamily}
           onChange={(e) => onUpdateTerminal({ fontFamily: e.target.value })}
+        />
+      </Field>
+
+      <Field label="Font Family (Output Panel)">
+        <input
+          type="text"
+          className="settings-input"
+          value={terminal.outputFont || ''}
+          onChange={(e) => onUpdateTerminal({ outputFont: e.target.value })}
+          placeholder="留空使用默认 (Cascadia Code / Sarasa Mono SC / JetBrains Mono)"
         />
       </Field>
 
@@ -405,6 +438,65 @@ function LoggingSettings({
         exceeding the max size are automatically rotated with a timestamp suffix.
       </p>
     </>
+  );
+}
+
+// ---- SoulSettings (Personality) ----
+
+function SoulSettings({ profile, onSelect }: { profile: string; onSelect: (key: string) => void }) {
+  const entries = Object.entries(SOUL_PRESETS);
+  const labels: Record<string, string> = {
+    default: '默认 · 简洁专业',
+    steady: '沉稳严谨 · 专业克制',
+    casual: '轻松随和 · 自然聊天',
+    terse: '干练利落 · 直奔主题',
+    curious: '好奇活泼 · 情绪生动',
+    cool: '高冷简约 · 话少到位',
+    gentle: '温柔耐心 · 给人踏实',
+    funny: '幽默打趣 · 轻松俏皮',
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <span className="text-[10px] uppercase tracking-wide text-[var(--text-3)]">AI 回复风格</span>
+        <p className="text-[11px] text-[var(--text-4)] mt-1">
+          选择 AI 的回答风格。切换后下次对话生效。
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
+        {entries.map(([key, content]) => {
+          const active = profile === key;
+          const preview = content.split('\n').filter(l => l.trim() && !l.startsWith('##') && !l.startsWith('###')).slice(0, 3).join(' ').slice(0, 120);
+          return (
+            <button
+              key={key}
+              onClick={() => onSelect(key)}
+              className={`w-full text-left px-3 py-2.5 rounded-md border transition-all ${
+                active
+                  ? 'border-[var(--accent)] bg-[var(--veil)]'
+                  : 'border-[var(--border)] hover:border-[var(--border-hi)]'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className={`text-[12px] font-medium ${active ? 'text-[var(--text-1)]' : 'text-[var(--text-2)]'}`}>
+                  {labels[key] || key}
+                </span>
+                {active && <span className="text-[10px] text-[var(--accent)]">● 使用中</span>}
+              </div>
+              <div className="text-[10px] text-[var(--text-4)] mt-0.5 leading-relaxed">
+                {preview}...
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="text-[10px] text-[var(--text-4)] pt-2 border-t border-[var(--border)]">
+        编辑项目根目录的 <code className="bg-[var(--raised)] px-1 rounded">SOUL.md</code> 可自定义性格设定
+      </div>
+    </div>
   );
 }
 

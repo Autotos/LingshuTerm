@@ -4,7 +4,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useOutputStore } from '@/stores/outputStore';
-import { nlToAction, resolveProvider } from '@/lib/aiService';
+import { nlToAction, resolveProvider, getLastTokenUsage } from '@/lib/aiService';
 import type { AiTaskStep, ChatMessage } from '@/lib/aiService';
 import { assemblePrompt, appendShortTerm } from '@/lib/memoryService';
 import {
@@ -33,6 +33,87 @@ interface UseAiSubmitReturn {
     onChoose: (choice: 'deny' | 'allow-once' | 'allow-all') => void;
     onDismiss: () => void;
   };
+}
+
+/** Build a personality-aware response with the actual data included. */
+function buildPersonalityResponse(
+  profileKey: string,
+  query: string,
+  outputs: { description: string; command: string; output: string }[],
+): string | null {
+  if (outputs.length === 0) return null;
+
+  const isCount = /\b(多少|几个|统计.*数|数量|Count|\.Count|wc -l|\.Length|Measure-Object)\b/i.test(query);
+  const isList = /\b(列出|列表|显示|查看|有哪些|什么文件|什么软件|ls |dir |Get-ChildItem|winget list)\b/i.test(query);
+
+  // Collect all output data
+  const data = outputs.map((o) => o.output.trim()).filter(Boolean).join('\n');
+  if (!data) return null;
+
+  // For count queries, extract the number
+  if (isCount) {
+    const numMatch = data.match(/\b(\d+)\b/);
+    if (numMatch) {
+      const count = numMatch[1];
+      const subject = extractSubject(query);
+      return formatCountResponse(profileKey, count, subject);
+    }
+  }
+
+  // For list queries, return a personality prefix (data shown separately)
+  if (isList) {
+    return formatListResponse(profileKey);
+  }
+
+  // Generic response
+  return formatGenericResponse(profileKey);
+}
+
+function extractSubject(query: string): string {
+  const m = query.match(/(?:桌面|目录|文件夹|文件|软件|进程|服务)/);
+  return m ? m[0] : '项目';
+}
+
+function formatCountResponse(profile: string, count: string, subject: string): string {
+  const lines: Record<string, string> = {
+    default: `当前${subject}数量为 **${count}** 个。`,
+    steady: `好的，已确认：当前${subject}共 **${count}** 个。`,
+    casual: `收到啦～ ${subject}一共 **${count}** 个！`,
+    terse: `${subject}: ${count}`,
+    curious: `哇，统计出来了！${subject}有 **${count}** 个呢～`,
+    cool: `${count}`,
+    gentle: `整理好了，${subject}目前有 **${count}** 个。`,
+    funny: `好家伙，${subject}总共 **${count}** 个！`,
+  };
+  return lines[profile] || lines.default;
+}
+
+function formatListResponse(profile: string): string {
+  const lines: Record<string, string> = {
+    default: '好的，结果如下：',
+    steady: '好的，列表已整理如下：',
+    casual: '收到啦，给你列出来～',
+    terse: '列表：',
+    curious: '哇，查到了！快看：',
+    cool: '',
+    gentle: '整理好了，请查看：',
+    funny: '热乎的列表，请过目：',
+  };
+  return lines[profile] || lines.default;
+}
+
+function formatGenericResponse(profile: string): string {
+  const lines: Record<string, string> = {
+    default: '好的，结果如下：',
+    steady: '好的，结果如下：',
+    casual: '收到啦，看结果～',
+    terse: '',
+    curious: '出来啦！看：',
+    cool: '',
+    gentle: '整理好了：',
+    funny: '来了来了：',
+  };
+  return lines[profile] || lines.default;
 }
 
 function resolveSessionName(connectionId: string): string {
@@ -69,7 +150,7 @@ async function executeTerminalCreate(
 
   const total = hostList.length * perHost;
   if (total > 50) {
-    out.append(`终端数量 ${total} 超过上限 50，请缩小范围`);
+    out.info(`终端数量 ${total} 超过上限 50，请缩小范围`);
     out.setStatus('error');
     return false;
   }
@@ -85,17 +166,17 @@ async function executeTerminalCreate(
         created++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        out.append(`${connectionLabel(config)}: ${msg}`);
+        out.info(`${connectionLabel(config)}: ${msg}`);
       }
     }
   }
 
   if (created > 0) {
-    out.append(`已创建 ${created} 个终端`);
+    out.info(`已创建 ${created} 个终端`);
     out.setStatus('done');
     return true;
   }
-  out.append('终端创建失败');
+  out.info('终端创建失败');
   out.setStatus('error');
   return false;
 }
@@ -104,6 +185,7 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const stepIndexRef = useRef(1);
 
   // Harness confirm dialog state
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -129,6 +211,7 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
 
       setIsLoading(true);
       setError(null);
+      stepIndexRef.current = 1;
 
       abortRef.current?.abort();
       const controller = new AbortController();
@@ -141,21 +224,21 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
         const provider = resolveProvider(config);
 
         out.setStatus('running');
-        out.append(`> ${query}`);
+        out.heading(`任务：${query}`);
 
         // ── Phase 1: Regex terminal-creation detection ──
         const quickAction = detectTerminalCreateIntent(query);
         if (quickAction) {
           const ok = await executeTerminalCreate(quickAction, out);
           if (ok) return;
-          out.append('连接失败，请检查主机地址、用户名和端口是否正确');
+          out.info('连接失败，请检查主机地址、用户名和端口是否正确');
           out.setStatus('error');
           return;
         }
 
         // ── Phase 2: LLM + Harness Pipeline ──
         if (!provider.baseUrl) {
-          out.append('AI API 未配置，请在设置中配置 AI 服务');
+          out.info('AI API 未配置，请在设置中配置 AI 服务');
           out.setStatus('done');
           return;
         }
@@ -191,13 +274,14 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
 
         // Fallback: Harness Pipeline (single-turn planner + middleware)
         const harnessConfig = useSettingsStore.getState().settings.harness;
+        const capturedOutputs: { description: string; command: string; output: string }[] = [];
 
         const result = await runPipeline(
           query,
           sessionId ?? memoryId,
           {
             signal: controller.signal,
-            onProgress: (status) => out.append(status),
+            onProgress: (_status) => {},
             onConfirm: async (step, guardResult) => {
               if (allowAllRef.current) return true;
               return new Promise<boolean>((resolve) => {
@@ -208,25 +292,63 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
               });
             },
             onExecuteStart: (step) => {
-              out.append(`  $ ${step.command}  — ${step.description}`);
+              stepIndexRef.current++;
+              out.codeBlock(step.description, step.command);
             },
-            onExecuteEnd: (_step, _exitCode) => {
-              // Block event system handles actual exit code tracking
+            onExecuteEnd: (_step, exitCode, capturedOutput) => {
+              if (exitCode !== 0) {
+                out.result(`✖ 执行失败 (exit: ${exitCode})`);
+              }
+              if (capturedOutput) {
+                capturedOutputs.push({
+                  description: _step.description,
+                  command: _step.command,
+                  output: capturedOutput,
+                });
+                // Data display deferred — personality prefix goes first
+              }
             },
           },
           harnessConfig,
         );
 
-        // Display results
-        out.append(result.summary);
+        // ── Status (errors only) ──
         if (result.finalStatus === 'denied') {
-          out.append('任务被安全策略拒绝');
+          out.result('✖ 已拒绝 — 命令被安全策略拦截');
           out.setStatus('error');
         } else if (result.finalStatus === 'failed') {
-          out.append('任务执行或验证失败');
+          out.result(`✖ 失败 — ${result.summary}`);
           out.setStatus('error');
         } else {
           out.setStatus('done');
+        }
+
+        if (result.progressUpdated) {
+          out.info('📝 任务进度已保存至 PROGRESS.md');
+        }
+
+        // ── Personality prefix + data output ──
+        if (result.finalStatus === 'success' && result.steps.length > 0) {
+          const profile = useSettingsStore.getState().settings.soulProfile;
+          const allData = capturedOutputs.map((o) => o.output.trim()).filter(Boolean).join('\n');
+          const prefix = buildPersonalityResponse(profile, query, capturedOutputs);
+
+          // Show personality prefix FIRST
+          if (prefix) {
+            out.separator();
+            out.result(prefix);
+          }
+
+          // Then show the data (FileListView handles structured output)
+          if (allData) {
+            out.result(allData);
+          }
+        }
+
+        // Token usage
+        const tokens = getLastTokenUsage();
+        if (tokens) {
+          out.info(`🔢 Tokens · 输入 ${tokens.input} · 输出 ${tokens.output}`);
         }
 
         // Save to memory
@@ -248,7 +370,7 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
         if ((err as Error).name !== 'AbortError') {
           const msg = err instanceof Error ? err.message : String(err);
           out.setStatus('error');
-          out.append(msg);
+          out.info(msg);
           setError(msg);
         }
       } finally {

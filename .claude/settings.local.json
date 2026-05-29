@@ -20,7 +20,12 @@
       "Bash(node -e ' *)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(git remote *)",
+      "Bash(gh release create v3.4.0 --title 'v3.4.0 - SSH服务器监控Tooltip增强' --notes ' *)",
+      "Bash(where gh *)",
+      "Bash(cmd.exe /c \"where gh\")",
+      "Bash(ssh -T -o ConnectTimeout=10 git@github.com)"
     ]
   }
 }

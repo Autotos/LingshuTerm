@@ -6,6 +6,7 @@ use lingshu_term2_lib::{
     commands,
     connection::ConnectionManager,
     connection_commands,
+    exec_shell,
     harness_commands,
     logger,
     persistence,
@@ -98,6 +99,8 @@ fn main() {
             sftp::sftp_create_file,
             // AI proxy (CORS bypass)
             ai_proxy::ai_proxy_request,
+            // Direct shell command execution (no PTY)
+            exec_shell::exec_shell_cmd,
             // Harness middleware
             harness_commands::read_agents_md,
             harness_commands::write_agents_md,

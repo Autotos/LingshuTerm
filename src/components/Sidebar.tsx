@@ -1,11 +1,18 @@
-import { ChevronLeft, ChevronRight, Monitor, ListTodo, Plus, Save, Trash2 } from 'lucide-react';
+import { forwardRef } from 'react';
+import { ChevronLeft, ChevronRight, Monitor, ListTodo, Plus, Trash2 } from 'lucide-react';
 import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
-import { saveSessions } from '@/lib/persistenceService';
 import { TaskBoard } from './TaskBoard';
 
-export function Sidebar() {
-  const { sessions, activeSessionId, setActiveSession, removeSession, restoreTerminals } =
+interface SidebarProps {
+  sidebarWidth: number;
+}
+
+export const Sidebar = forwardRef<HTMLElement, SidebarProps>(function Sidebar(
+  { sidebarWidth },
+  ref,
+) {
+  const { sessions, activeSessionId, setActiveSession, removeSession } =
     useSessionStore();
   const {
     sidebarCollapsed,
@@ -18,9 +25,9 @@ export function Sidebar() {
 
   return (
     <aside
-      className={`flex flex-col flex-shrink-0 bg-[var(--deep)] border-r border-[var(--border)] overflow-hidden transition-[width] duration-200 ${
-        sidebarCollapsed ? 'w-[44px]' : 'w-[260px]'
-      }`}
+      ref={ref}
+      className="flex flex-col flex-shrink-0 bg-[var(--deep)] border-r border-[var(--border)] overflow-hidden"
+      style={{ width: sidebarCollapsed ? 44 : sidebarWidth }}
     >
       {/* Header with tabs */}
       <div
@@ -46,127 +53,61 @@ export function Sidebar() {
         )}
         <button
           onClick={toggleSidebar}
-          className="w-7 h-7 flex items-center justify-center rounded border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] hover:border-[var(--border)] transition-all"
-          title={sidebarCollapsed ? 'Expand' : 'Collapse'}
+          className="p-1 rounded text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] transition-colors"
+          title={sidebarCollapsed ? '展开侧边栏' : '折叠侧边栏'}
         >
-          {sidebarCollapsed ? (
-            <ChevronRight className="w-3.5 h-3.5" />
-          ) : (
-            <ChevronLeft className="w-3.5 h-3.5" />
-          )}
+          {sidebarCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
         </button>
       </div>
 
-      {/* Content: Sessions or Tasks */}
-      {sidebarTab === 'sessions' ? (
-        <>
-          {/* Session list */}
-          <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {Array.from(sessions.values()).map((session) => (
-              <div
-                key={session.id}
-                onDoubleClick={() => {
-                  setActiveSession(session.id);
-                  restoreTerminals(session.id);
-                }}
-                className={`group flex items-center gap-1 rounded cursor-pointer text-xs whitespace-nowrap overflow-hidden transition-all ${
-                  session.id === activeSessionId
-                    ? 'bg-[var(--veil)] border border-[var(--border)] text-[var(--text-1)]'
-                    : 'text-[var(--text-2)] hover:bg-[var(--veil)] hover:text-[var(--text-1)]'
-                } ${sidebarCollapsed ? 'justify-center px-2 py-2' : 'px-2 py-2'}`}
-              >
-                <div
-                  className="flex items-center gap-2 flex-1 min-w-0"
-                  onClick={() => setActiveSession(session.id)}
-                >
-                  <span
-                    className={`w-[6px] h-[6px] rounded-full flex-shrink-0 ${
-                      session.status === 'connected' ? 'bg-[var(--green)]' : 'bg-[var(--accent)]'
-                    }`}
-                  />
-                  {!sidebarCollapsed && (
-                    <span className="truncate">{session.title || session.id}</span>
-                  )}
-                </div>
-                {!sidebarCollapsed && (
-                  <>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openTerminalModal(session.id);
-                      }}
-                      title="Add terminal"
-                      className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] transition-all"
-                    >
-                      <Plus className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // Save ALL live sessions to the unified session.json
-                        const allSessions = useSessionStore.getState().sessions;
-                        const entries = Array.from(allSessions.values()).map((s) => ({
-                          id: s.id,
-                          name: s.title || s.id,
-                          terminals: s.terminals.map((t) => {
-                            const cfg = t.config as unknown as Record<string, unknown> | null;
-                            return {
-                              id: t.id,
-                              name: t.title,
-                              type: cfg?.protocol as string ?? 'unknown',
-                              host: cfg?.host as string | undefined,
-                              port: cfg?.port as number | undefined,
-                              user: cfg?.username as string | undefined,
-                              config: t.config,
-                            };
-                          }),
-                        }));
-                        saveSessions({ sessions: entries }).catch((err) =>
-                          console.error('Failed to save sessions:', err),
-                        );
-                      }}
-                      title="Save all sessions"
-                      className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-[var(--text-3)] hover:text-[var(--green)] hover:bg-[var(--veil)] transition-all"
-                    >
-                      <Save className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (window.confirm(`Delete session "${session.title || session.id}"?`)) {
-                          removeSession(session.id);
-                        }
-                      }}
-                      title="Delete session"
-                      className="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-[var(--text-3)] hover:text-[var(--red)] hover:bg-[var(--veil)] transition-all"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </>
-                )}
-              </div>
-            ))}
+      {/* Content */}
+      {!sidebarCollapsed && (
+        <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+          <div className="flex-1 overflow-y-auto">
+            {sidebarTab === 'sessions' ? (
+              <SessionList
+                sessions={sessions}
+                activeSessionId={activeSessionId}
+                onSelect={setActiveSession}
+                onRemove={removeSession}
+                onCreateSession={openCreateSessionModal}
+              />
+            ) : (
+              <TaskBoard sessionId={activeSessionId} collapsed={false} />
+            )}
           </div>
 
-          {/* Footer: "New Session" button */}
-          <div className="p-2 border-t border-[var(--border)]">
+          {/* Footer */}
+          <div className="flex-shrink-0 border-t border-[var(--border)] px-2 py-1.5 flex items-center gap-1">
             <button
-              onClick={openCreateSessionModal}
-              className={`w-full rounded bg-[var(--veil)] border border-[var(--border)] text-[var(--text-2)] text-[11px] tracking-wide cursor-pointer hover:text-[var(--text-1)] hover:border-[var(--border-hi)] transition-all ${
-                sidebarCollapsed ? 'px-2 py-2 text-center' : 'px-3 py-2'
-              }`}
-              title="New session (Remote or Local)"
+              onClick={() => activeSessionId && openTerminalModal(activeSessionId)}
+              disabled={!activeSessionId}
+              className="flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-[10px] text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="新建终端"
             >
-              {sidebarCollapsed ? '+' : '+ New Session'}
+              <Plus className="w-3 h-3" />
+              Terminal
+            </button>
+            <button
+              onClick={() => {
+                if (activeSessionId) {
+                  removeSession(activeSessionId);
+                }
+              }}
+              disabled={!activeSessionId}
+              className="p-1 rounded text-[var(--text-3)] hover:text-[var(--red)] hover:bg-[var(--veil)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              title="删除会话"
+            >
+              <Trash2 className="w-3 h-3" />
             </button>
           </div>
-        </>
-      ) : (
-        <TaskBoard sessionId={activeSessionId} collapsed={sidebarCollapsed} />
+        </div>
       )}
     </aside>
   );
-}
+});
+
+// ── Internal helpers ──────────────────────────────────────────────
 
 function SidebarTabBtn({
   icon,
@@ -182,14 +123,81 @@ function SidebarTabBtn({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-all ${
+      className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-colors ${
         active
-          ? 'bg-[var(--veil)] border border-[var(--border)] text-[var(--text-1)]'
-          : 'border border-transparent text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)]'
+          ? 'bg-[var(--veil)] text-[var(--text-1)]'
+          : 'text-[var(--text-3)] hover:text-[var(--text-1)] hover:bg-[var(--veil)]'
       }`}
     >
       {icon}
       {label}
     </button>
+  );
+}
+
+interface SessionListProps {
+  sessions: ReturnType<typeof useSessionStore.getState>['sessions'];
+  activeSessionId: string | null;
+  onSelect: (id: string) => void;
+  onRemove: (id: string) => void;
+  onCreateSession: () => void;
+}
+
+function SessionList({
+  sessions,
+  activeSessionId,
+  onSelect,
+  onRemove,
+  onCreateSession,
+}: SessionListProps) {
+  if (sessions.size === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 px-4">
+        <span className="text-[11px] text-[var(--text-4)] text-center leading-relaxed">
+          No sessions yet.
+          <br />
+          Create one to get started.
+        </span>
+        <button
+          onClick={onCreateSession}
+          className="flex items-center gap-1 px-3 py-1.5 rounded text-[11px] bg-[var(--accent)] text-white hover:bg-[var(--accent-hi)] transition-colors"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          New Session
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="py-1">
+      {Array.from(sessions.values()).map((s) => (
+        <div
+          key={s.id}
+          onClick={() => onSelect(s.id)}
+          className={`group flex items-center gap-2 px-3 py-1.5 cursor-pointer text-[11px] transition-colors ${
+            s.id === activeSessionId
+              ? 'bg-[var(--veil)] text-[var(--text-1)] border-r-2 border-[var(--accent)]'
+              : 'text-[var(--text-2)] hover:bg-[var(--veil)] border-r-2 border-transparent'
+          }`}
+        >
+          <Monitor className="w-3 h-3 flex-shrink-0 text-[var(--text-4)]" />
+          <span className="flex-1 truncate">{s.title || s.id}</span>
+          <span className="text-[9px] text-[var(--text-4)] tabular-nums">
+            {s.terminals.length}
+          </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(s.id);
+            }}
+            className="opacity-0 group-hover:opacity-100 p-0.5 rounded text-[var(--text-4)] hover:text-[var(--red)] transition-all"
+            title="删除会话"
+          >
+            <Trash2 className="w-2.5 h-2.5" />
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }

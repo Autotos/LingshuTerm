@@ -12,7 +12,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { DEFAULT_AGENTS_MD } from './defaults';
+import { DEFAULT_AGENTS_MD, DEFAULT_SOUL_MD } from './defaults';
 import { progressWriter } from './progressWriter';
 import type { InjectResult, HarnessContext } from './types';
 import type { ChatMessage } from '@/lib/aiService';
@@ -30,33 +30,83 @@ let _cache: CacheEntry | null = null;
 
 // ─── System prompt base (migrated from aiService.ts) ─────────────
 
-const BASE_SYSTEM_PROMPT = `你是一位专业的 Linux/macOS/Windows 运维专家，用户会用自然语言描述他们想要完成的操作任务。
-你的职责是将用户的自然语言描述转换为可以在终端中执行的 Shell 命令序列。
+const BASE_SYSTEM_PROMPT = `你是一位专业的终端运维助手，运行在用户的真实操作系统中。你的职责是将自然语言转换为可在当前终端执行的 Shell 命令序列。
+
+## 关键规则：平台感知
+
+**绝对不要同时为多个平台生成命令！** 上下文会告诉你当前的操作系统信息。你必须：
+1. 根据上下文中的"当前操作系统"选择正确的命令语法（Windows = PowerShell/CMD，macOS = zsh/bash，Linux = bash）
+2. 如果你的第一步是查询类任务且不确定环境，首先生成 \`uname -s\` 或 \`ver\` 来确认平台
+3. 所有命令必须是当前平台可执行的，不要生成其他平台的命令
 
 ## 输出规则
 
-1. 通常返回一个 JSON 数组，每个元素包含 "description"（中文描述）和 "command"（Shell 命令）。
-2. 命令应该是可以直接执行的完整命令，不要使用占位符。
-3. 如果任务需要多个步骤，按照执行顺序排列。
-4. 只返回 JSON 数组，不要包含任何其他文字、解释或 Markdown 标记。
-5. 如果用户的描述不明确或无法转换为命令，返回空数组 []。`;
+1. 返回一个 JSON 数组，每个元素包含 "description"（中文描述）和 "command"（Shell 命令）。
+2. 命令必须是可直接执行的完整命令，不要使用占位符或模板变量。
+3. 多步骤按执行顺序排列。
+4. 只返回 JSON 数组，不要包含任何解释或 Markdown。
+5. 描述不明确时返回空数组 []。
+
+## 路径兼容规则
+
+**绝对不要使用 ~ 表示用户主目录！** 非交互式 Shell（后台执行）不会展开波浪号。
+- Windows: 使用 \`$env:USERPROFILE\` 或 \`[Environment]::GetFolderPath('Desktop')\`
+- Unix: 使用 \`$HOME\` 或绝对路径
+- 桌面路径示例: \`$HOME/Desktop\` 或 \`$env:USERPROFILE\\Desktop\``;
+
+// ─── Host OS detection ───────────────────────────────────────────
+
+function detectHostOs(): string {
+  const p = navigator.platform?.toLowerCase() ?? '';
+  const ua = navigator.userAgent?.toLowerCase() ?? '';
+
+  if (p.startsWith('win')) {
+    // Detect architecture for more context
+    const arch = navigator.userAgent?.includes('WOW64') || navigator.userAgent?.includes('Win64') ? 'x64' : 'x86';
+    return `Windows (${arch}), 默认 Shell: PowerShell / CMD`;
+  }
+  if (p.startsWith('mac')) return 'macOS (Darwin), 默认 Shell: zsh / bash';
+  if (p.startsWith('linux')) {
+    if (ua.includes('android')) return 'Android (Linux), 默认 Shell: sh';
+    return 'Linux, 默认 Shell: bash';
+  }
+  return '未知操作系统';
+}
 
 // ─── Public API ──────────────────────────────────────────────────
 
 /** Read AGENTS.md with cache. Creates default template if missing. */
 async function readAgentsMd(): Promise<string> {
-  // Check cache
   if (_cache && (Date.now() - _cache.ts) < CACHE_TTL_MS) {
     return _cache.content;
   }
-
   try {
     const content: string = await invoke('read_agents_md');
     _cache = { content, ts: Date.now() };
     return content;
   } catch {
-    // File doesn't exist or read failed — return default
     return DEFAULT_AGENTS_MD;
+  }
+}
+
+// ─── SOUL.md cache ───────────────────────────────────────────────
+
+let _soulCache: CacheEntry | null = null;
+
+/** Read SOUL.md — AI personality profile. */
+async function readSoulMd(): Promise<string> {
+  if (_soulCache && (Date.now() - _soulCache.ts) < CACHE_TTL_MS) {
+    return _soulCache.content;
+  }
+  try {
+    const content: string = await invoke('read_memory_file', {
+      sessionId: '__project__',
+      filename: 'SOUL.md',
+    });
+    _soulCache = { content, ts: Date.now() };
+    return content;
+  } catch {
+    return DEFAULT_SOUL_MD;
   }
 }
 
@@ -111,9 +161,23 @@ export async function buildInjection(
   preMessages?: ChatMessage[],
 ): Promise<InjectResult> {
   const agentsMd = await readAgentsMd();
+  const soulMd = await readSoulMd();
 
   // Build system prompt
-  const parts: string[] = [agentsMd];
+  const parts: string[] = [];
+
+  // Inject host OS
+  const hostOs = detectHostOs();
+  parts.push(`> **当前操作系统**：${hostOs}`);
+
+  // Personality profile (SOUL.md) — shapes the AI's tone and style
+  if (soulMd && soulMd !== DEFAULT_SOUL_MD) {
+    parts.push('');
+    parts.push(soulMd);
+  }
+
+  parts.push('');
+  parts.push(agentsMd);
   parts.push('\n---\n');
   parts.push(BASE_SYSTEM_PROMPT);
 

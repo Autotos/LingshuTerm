@@ -10,6 +10,8 @@ interface AppSettings {
   terminal: {
     fontSize: number;
     fontFamily: string;
+    /** Output panel font (defaults to CJK-aware monospace stack) */
+    outputFont: string;
     scrollback: number;
     autoFit: boolean;
     defaultColumns: number;
@@ -17,6 +19,8 @@ interface AppSettings {
   };
   ai: AiConfig;
   harness: HarnessConfig;
+  /** Active SOUL.md profile key (e.g. 'default', 'concise', 'friendly') */
+  soulProfile: string;
   logging: {
     enabled: boolean;
     logPath: string;
@@ -30,6 +34,7 @@ interface SettingsState {
   updateSettings: (patch: Partial<AppSettings>) => void;
   updateAiSettings: (patch: Partial<AiConfig>) => void;
   updateHarnessSettings: (patch: Partial<HarnessConfig>) => void;
+  setSoulProfile: (profile: string) => void;
   updateProvider: (providerId: string, patch: Partial<AiProviderConfig>) => void;
   addProvider: (presetKey?: string) => void;
   removeProvider: (providerId: string) => void;
@@ -42,6 +47,7 @@ const defaultSettings: AppSettings = {
   terminal: {
     fontSize: 13,
     fontFamily: 'Berkeley Mono, JetBrains Mono, SF Mono, Monaco, Menlo, Consolas, monospace',
+    outputFont: '',
     scrollback: 10000,
     autoFit: true,
     defaultColumns: 80,
@@ -49,6 +55,7 @@ const defaultSettings: AppSettings = {
   },
   ai: defaultAiConfig,
   harness: DEFAULT_HARNESS_CONFIG,
+  soulProfile: 'default',
   logging: {
     enabled: true,
     logPath: '',
@@ -134,6 +141,12 @@ export const useSettingsStore = create<SettingsState>()((set, get) => {
 
     updateHarnessSettings: (patch) => {
       const next = { ...get().settings, harness: { ...get().settings.harness, ...patch } };
+      scheduleSave(next);
+      set({ settings: next });
+    },
+
+    setSoulProfile: (profile) => {
+      const next = { ...get().settings, soulProfile: profile };
       scheduleSave(next);
       set({ settings: next });
     },
