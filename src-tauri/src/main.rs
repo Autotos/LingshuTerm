@@ -8,6 +8,7 @@ use lingshu_term2_lib::{
     connection_commands,
     exec_shell,
     harness_commands,
+    media,
     logger,
     persistence,
     server_manager,
@@ -101,6 +102,8 @@ fn main() {
             ai_proxy::ai_proxy_request,
             // Direct shell command execution (no PTY)
             exec_shell::exec_shell_cmd,
+            // Media file utilities
+            media::read_image_base64,
             // Harness middleware
             harness_commands::read_agents_md,
             harness_commands::write_agents_md,

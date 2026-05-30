@@ -28,7 +28,7 @@ pub struct ExecShellResult {
 /// process is killed and exit_code is set to -1.
 #[tauri::command]
 pub fn exec_shell_cmd(command: String, timeout_secs: Option<u64>) -> ExecShellResult {
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(60).min(120));
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(60).min(600));
 
     let shell: &str;
     let shell_args: Vec<&str>;

@@ -225,10 +225,14 @@ export async function runPipeline(
       }
     }
 
-    // Execute and capture output
+    // Execute and capture output.
+    // Long-running commands (recursive scans, downloads) get a longer timeout.
+    const isLongRunning = /-Recurse|npm (install|build)|cargo build|pip install|winget install/i.test(step.command);
+    const timeout = isLongRunning ? 300_000 : 60_000;
+
     onExecuteStart(step);
     try {
-      const execResult = await executeAndCapture(execSessionId, step.command, 30_000);
+      const execResult = await executeAndCapture(execSessionId, step.command, timeout);
       const capturedOutput = execResult.output.trim();
       onExecuteEnd(step, execResult.exitCode, capturedOutput);
       if (execResult.exitCode !== 0) {

@@ -186,12 +186,13 @@ export function Layout() {
             </div>
           </div>
 
-          {/* Output resizer — horizontal dragger */}
+          {/* Output resizer — horizontal dragger. Max height = window height minus
+              title bar (~40px) + tab bar (~36px) + status bar (~24px) + input (~28px) + padding */}
           <Resizer
             axis="y"
             currentSize={outputHeight}
             minSize={100}
-            maxSize={600}
+            maxSize={Math.max(200, window.innerHeight - 160)}
             onResize={setOutputHeight}
             targetRef={outputRef}
           />
