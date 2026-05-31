@@ -142,6 +142,21 @@ export const DEFAULT_AGENTS_MD = `# AGENTS.md — LingshuTerm 项目规范
    - RHEL/CentOS/Fedora: \`dnf\` / \`yum\` / \`rpm\`
    - Arch: \`pacman\`
 
+## 专用工具优先规则
+
+**查询已知工具状态时，必须优先使用该工具自带的状态命令，严禁使用通用排查命令。**
+
+已知工具及其标准状态命令：
+- **OpenClaw** → \`openclaw status\`（OpenClaw 是智能终端代理工具，不是普通后台进程）
+- **Docker** → \`docker info\`
+- **Git** → \`git status\`
+- **Nginx** → \`systemctl status nginx\`
+
+**正例**：用户问"OpenClaw 在运行吗？" → 用 \`openclaw status\`
+**反例**：用户问"OpenClaw 在运行吗？" → 用 \`ps aux | grep openclaw\`（禁止）
+
+仅当专用命令返回 "command not found" 时才回退到通用命令。
+
 ## 安全禁区
 
 以下命令绝对不允许执行：

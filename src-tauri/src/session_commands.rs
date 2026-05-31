@@ -59,6 +59,31 @@ pub async fn query_server_stats(
     conn.query_server_stats(&session_id).await.map_err(|e| e.to_string())
 }
 
+/// Execute an arbitrary command on a remote SSH server via exec channel.
+/// Returns { stdout, exit_code }.  Only works for `ssh-*` prefixed session IDs.
+#[derive(serde::Serialize)]
+pub struct SshExecResult {
+    pub stdout: String,
+    pub exit_code: i32,
+}
+
+#[tauri::command]
+pub async fn ssh_exec_cmd(
+    conn: State<'_, ConnectionManager>,
+    session_id: String,
+    command: String,
+    timeout_secs: Option<u64>,
+) -> Result<SshExecResult, String> {
+    if !session_id.starts_with("ssh-") {
+        return Err("ssh_exec_cmd only available for SSH sessions".to_string());
+    }
+    let (stdout, exit_code) = conn
+        .ssh_exec(&session_id, &command, timeout_secs.unwrap_or(30))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(SshExecResult { stdout, exit_code })
+}
+
 /// Enumerate local shells available on the current OS.
 #[tauri::command]
 pub async fn list_local_shells() -> Result<Vec<LocalShellOption>, String> {

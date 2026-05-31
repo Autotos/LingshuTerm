@@ -1,6 +1,7 @@
 import { useRef, useEffect, forwardRef, useCallback, useState } from 'react';
 import {
   ChevronUp, ChevronDown, Trash2, Loader2, Circle,
+  Expand, Shrink,
   Folder, File, FileCode, FileText, FileImage, FileArchive,
   FileAudio, FileVideo, Link, Box, Globe, Cpu, Bot, Database, Terminal,
 } from 'lucide-react';
@@ -19,8 +20,9 @@ export const OutputPanel = forwardRef<HTMLDivElement, { outputHeight: number }>(
       s.settings.terminal.outputFont || OUTPUT_FONT_STACK);
     const setOutputHeight = useUiStore((s) => s.setOutputHeight);
     const containerRef = useRef<HTMLDivElement>(null);
+    // Global expand/collapse: null = per-item, true = all open, false = all closed
+    const [allExpanded, setAllExpanded] = useState<boolean | null>(null);
 
-    // Expand to 3/4 of the viewport height (minus chrome: title ~40, tab ~36, status ~24, input ~28)
     const handleToggle = useCallback(() => {
       if (!isExpanded) {
         setOutputHeight(Math.round((window.innerHeight - 130) * 0.75));
@@ -37,19 +39,24 @@ export const OutputPanel = forwardRef<HTMLDivElement, { outputHeight: number }>(
 
     return (
       <div className="flex-shrink-0 border-t border-[var(--border)] bg-[var(--deep)]">
-        <HeaderBar status={status} itemCount={items.length} isExpanded={isExpanded} onToggle={handleToggle} onClear={clear} />
+        <HeaderBar status={status} itemCount={items.length} isExpanded={isExpanded} onToggle={handleToggle} onClear={clear} onExpandAll={() => setAllExpanded(true)} onCollapseAll={() => setAllExpanded(false)} />
 
         <div
           ref={ref}
-          className={`overflow-hidden transition-[max-height] duration-300 ease-in-out ${
+          className={`transition-[max-height] duration-300 ease-in-out ${
             isExpanded ? 'border-t border-[var(--border)]' : ''
           }`}
-          style={{ maxHeight: isExpanded ? outputHeight : 0 }}
+          style={{
+            maxHeight: isExpanded ? outputHeight : 0,
+            height: isExpanded ? outputHeight : 0,
+            display: 'flex',
+            flexDirection: 'column',
+          }}
         >
           <div
             ref={containerRef}
-            className="min-h-0"
-            style={{ fontFamily: outputFont, overflowY: 'auto', height: '100%' }}
+            className="flex-1 min-h-0"
+            style={{ fontFamily: outputFont, overflowY: 'auto' }}
           >
             {items.length === 0 ? (
               <div className="px-3 py-2 text-[var(--text-3)] italic text-[12px]">
@@ -58,7 +65,7 @@ export const OutputPanel = forwardRef<HTMLDivElement, { outputHeight: number }>(
             ) : (
               <div className="py-1">
                 {items.map((item, i) => (
-                  <OutputItemView key={i} item={item} fontFamily={outputFont} />
+                  <OutputItemView key={i} item={item} fontFamily={outputFont} isLive={status === 'running'} allExpanded={allExpanded} />
                 ))}
               </div>
             )}
@@ -70,10 +77,11 @@ export const OutputPanel = forwardRef<HTMLDivElement, { outputHeight: number }>(
 );
 
 function HeaderBar({
-  status, itemCount, isExpanded, onToggle, onClear,
+  status, itemCount, isExpanded, onToggle, onClear, onExpandAll, onCollapseAll,
 }: {
   status: string; itemCount: number; isExpanded: boolean;
   onToggle: () => void; onClear: () => void;
+  onExpandAll: () => void; onCollapseAll: () => void;
 }) {
   return (
     <div
@@ -97,11 +105,23 @@ function HeaderBar({
         Output {itemCount > 0 && <span className="text-[var(--text-4)]">· {itemCount} items</span>}
       </span>
       {itemCount > 0 && (
-        <button onClick={(e) => { e.stopPropagation(); onClear(); }}
-          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--elevated)] text-[var(--text-4)] hover:text-[var(--text-1)] transition-all"
-          title="Clear">
-          <Trash2 className="w-3 h-3" />
-        </button>
+        <>
+          <button onClick={(e) => { e.stopPropagation(); onExpandAll(); }}
+            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--elevated)] text-[var(--text-4)] hover:text-[var(--text-1)] transition-all"
+            title="展开所有">
+            <Expand className="w-3 h-3" />
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); onCollapseAll(); }}
+            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--elevated)] text-[var(--text-4)] hover:text-[var(--text-1)] transition-all"
+            title="折叠所有">
+            <Shrink className="w-3 h-3" />
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); onClear(); }}
+            className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--elevated)] text-[var(--text-4)] hover:text-[var(--text-1)] transition-all"
+            title="清空">
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </>
       )}
       <span className="text-[var(--text-4)] group-hover:text-[var(--text-2)]">
         {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
@@ -113,7 +133,64 @@ function HeaderBar({
 // Regex for image file extensions — used by result renderer and ImageGrid
 const IMG_EXT_RE = /\.(jpe?g|png|gif|bmp|webp|tiff?|svg)$/i;
 
-function OutputItemView({ item, fontFamily }: { item: OutputItem; fontFamily: string }) {
+// ── Thinking block parser ────────────────────────────────────────
+
+interface TextChunk {
+  type: 'thinking' | 'text';
+  content: string;
+}
+
+const THINKING_RE = /<thinking>([\s\S]*?)<\/thinking>/g;
+
+function parseThinkingBlocks(text: string): TextChunk[] {
+  const chunks: TextChunk[] = [];
+  let lastIdx = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = THINKING_RE.exec(text)) !== null) {
+    // Text before the thinking block
+    if (match.index > lastIdx) {
+      const before = text.slice(lastIdx, match.index).trim();
+      if (before) chunks.push({ type: 'text', content: before });
+    }
+    // The thinking content itself
+    const thinkingContent = match[1].trim();
+    if (thinkingContent) chunks.push({ type: 'thinking', content: thinkingContent });
+    lastIdx = match.index + match[0].length;
+  }
+
+  // Remaining text after last thinking block
+  if (lastIdx < text.length) {
+    const after = text.slice(lastIdx).trim();
+    if (after) chunks.push({ type: 'text', content: after });
+  }
+
+  return chunks.length > 0 ? chunks : [{ type: 'text', content: text }];
+}
+
+function ThinkingBlock({ content, fontFamily, isLive, allExpanded }: { content: string; fontFamily: string; isLive: boolean; allExpanded: boolean | null }) {
+  const open = allExpanded !== null ? allExpanded : isLive;
+  return (
+    <details className="my-1.5 mx-3 text-[11px]" open={open}>
+      <summary className="flex items-center gap-1.5 cursor-pointer select-none text-[var(--text-3)] hover:text-[var(--text-2)] transition-colors py-0.5">
+        <span className="text-xs">{isLive ? '💭' : '🧠'}</span>
+        <span className="font-medium tracking-wide">
+          {isLive ? 'AI 正在思考...' : 'AI 思考过程 (点击展开)'}
+        </span>
+      </summary>
+      <div
+        className="mt-1.5 pl-5 py-2 pr-2 border-l-2 border-[var(--border-hi)] text-[var(--text-3)] whitespace-pre-wrap break-all leading-relaxed"
+        style={{ fontFamily }}
+      >
+        {content}
+      </div>
+    </details>
+  );
+}
+
+// ── Output item renderer ─────────────────────────────────────────
+
+function OutputItemView({ item, fontFamily, isLive, allExpanded }: { item: OutputItem; fontFamily: string; isLive: boolean; allExpanded: boolean | null }) {
   switch (item.kind) {
     case 'heading':
       return (
@@ -137,19 +214,32 @@ function OutputItemView({ item, fontFamily }: { item: OutputItem; fontFamily: st
         </div>
       );
 
-    case 'result':
+    case 'result': {
       if (!item.content.trim()) return null;
       const isSuccess = item.content.startsWith('✔') || item.content.startsWith('✅');
       const isError = item.content.startsWith('✖') || item.content.startsWith('❌');
       const isWarn = item.content.startsWith('⚠') || item.content.startsWith('△');
 
-      // Always try to parse as tabular file listing — raw text is the fallback
-      const files = parseFileListing(item.content);
-      const hasImages = IMG_EXT_RE.test(item.content);
+      // Parse thinking blocks from content
+      const chunks = parseThinkingBlocks(item.content);
+      const plainText = chunks.filter((c) => c.type === 'text').map((c) => c.content).join('\n');
+      const files = parseFileListing(plainText);
+      const hasImages = IMG_EXT_RE.test(plainText);
+
+      // Auto-collapse long text (> 15 lines or > 800 chars)
+      const isLong = !files.length && !hasImages &&
+        (plainText.split('\n').length > 15 || plainText.length > 800);
+
+      // Extract a meaningful preview line (first non-empty line that isn't a box char)
+      const lines = plainText.split('\n');
+      const previewLine = lines.find((l) => {
+        const t = l.trim();
+        return t.length > 20 && !/^[┌├└│─┬┴┼╭╰╭]+$/.test(t.replace(/[\s│┌├└┬┴┼─╭╰]/g, ''));
+      })?.trim().slice(0, 80) || lines[0]?.trim().slice(0, 80) || '';
 
       return (
         <div
-          className={`px-3 py-0.5 text-[12px] whitespace-pre-wrap break-all ${
+          className={`text-[12px] whitespace-pre-wrap break-all ${
             isSuccess ? 'text-[var(--green)]'
             : isError ? 'text-[var(--red)]'
             : isWarn ? 'text-[var(--yellow)]'
@@ -157,20 +247,62 @@ function OutputItemView({ item, fontFamily }: { item: OutputItem; fontFamily: st
           }`}
           style={{ fontFamily }}
         >
-          {files.length > 0 ? <FileListView files={files} fontFamily={fontFamily} /> : item.content}
-          {hasImages && <ImageGrid text={item.content} />}
+          {/* Render thinking blocks first */}
+          {chunks.filter((c) => c.type === 'thinking').map((chunk, i) => (
+            <ThinkingBlock key={`think-${i}`} content={chunk.content} fontFamily={fontFamily} isLive={isLive} allExpanded={allExpanded} />
+          ))}
+          {/* Render text content: file list if parsed, otherwise plain text.
+               Long output (>15 lines / >800 chars) auto-collapses. */}
+          {files.length > 0 ? (
+            <div className="px-3 py-0.5">
+              <FileListView files={files} fontFamily={fontFamily} />
+            </div>
+          ) : isLong ? (
+            <details className="my-1 mx-3" open={allExpanded ?? false}>
+              <summary className="text-[11px] cursor-pointer select-none py-0.5 group">
+                <span className="text-[var(--text-3)] group-hover:text-[var(--text-2)] transition-colors">
+                  📋 命令输出 · {lines.length} 行
+                  {previewLine ? ` — ${previewLine}...` : ' — 点击展开'}
+                </span>
+              </summary>
+              <div className="mt-1 max-h-[400px] overflow-y-auto">
+                {chunks.filter((c) => c.type === 'text').map((chunk, i) => (
+                  <div key={`text-${i}`} className="px-1 py-0.5 whitespace-pre-wrap break-all" style={{ fontFamily }}>
+                    {chunk.content}
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : (
+            chunks.filter((c) => c.type === 'text').map((chunk, i) => (
+              <div key={`text-${i}`} className="px-3 py-0.5">{chunk.content}</div>
+            ))
+          )}
+          {hasImages && <ImageGrid text={plainText} />}
         </div>
       );
+    }
 
-    case 'info':
+    case 'info': {
+      const infoChunks = parseThinkingBlocks(item.content);
       return (
-        <div
-          className="px-3 py-0.5 text-[11px] text-[var(--text-3)] whitespace-pre-wrap break-all"
-          style={{ fontFamily }}
-        >
-          {item.content}
+        <div>
+          {infoChunks.map((chunk, i) =>
+            chunk.type === 'thinking' ? (
+              <ThinkingBlock key={i} content={chunk.content} fontFamily={fontFamily} isLive={isLive} allExpanded={allExpanded} />
+            ) : (
+              <div
+                key={i}
+                className="px-3 py-0.5 text-[11px] text-[var(--text-3)] whitespace-pre-wrap break-all"
+                style={{ fontFamily }}
+              >
+                {chunk.content}
+              </div>
+            ),
+          )}
         </div>
       );
+    }
 
     case 'separator':
       return <div className="mx-3 my-1.5 border-t border-[var(--border)]" />;

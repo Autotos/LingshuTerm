@@ -9,6 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { nlToTasks, resolveProvider } from '@/lib/aiService';
 import type { AiTaskStep } from '@/lib/aiService';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -46,19 +47,61 @@ interface ExecuteResult {
 }
 
 /**
- * Execute a command and capture its output cleanly.
+ * Execute a command and capture its output.
  *
- * Uses the Rust `exec_shell_cmd` Tauri command which spawns a child process
- * (powershell.exe -NonInteractive on Windows, sh -c on Unix) and returns
- * stdout+stderr+exit_code directly — completely bypassing the PTY.
- *
- * No more echoed script lines, no ANSI noise, no prompt artifacts.
+ * For local sessions: uses `exec_shell_cmd` (spawns powershell/sh child process).
+ * For SSH sessions: uses `write_to_terminal` + event capture (commands run on
+ * the remote server, not locally).
  */
 async function executeAndCapture(
-  _sessionId: string,
+  sessionId: string,
   command: string,
   timeoutMs: number,
 ): Promise<ExecuteResult> {
+  const isSsh = sessionId.startsWith('ssh-');
+
+  // ── SSH remote: exec channel (clean) → fallback PTY with simple timeout ──
+  if (isSsh) {
+    // Strategy A: Dedicated SSH exec channel — clean stdout, no PTY noise
+    try {
+      const result: { stdout: string; exit_code: number } = await invoke('ssh_exec_cmd', {
+        sessionId,
+        command: `/bin/bash -l -c '${command.replace(/'/g, "'\\''")}'`,
+        timeoutSecs: Math.ceil(timeoutMs / 1000),
+      });
+      return {
+        commandId: '',
+        exitCode: result.exit_code,
+        output: result.stdout.trim(),
+      };
+    } catch {
+      // Strategy B: Write to PTY + simple timeout wait (no sentinel)
+      try {
+        const chunks: string[] = [];
+        const unlisten = await listen<{ type: string; session_id: string; data?: string }>(
+          'session-event', (event) => {
+            const p = event.payload;
+            if (p.session_id !== sessionId) return;
+            if ((p.type === 'output' || p.type === 'block-output') && p.data) chunks.push(p.data);
+          },
+        );
+        await invoke('write_to_terminal', { sessionId, data: `${command}\n` });
+        // Wait for command output — fixed delay based on timeout
+        await new Promise((r) => setTimeout(r, Math.min(timeoutMs, 15_000)));
+        try { unlisten(); } catch { /* ok */ }
+        const output = chunks.join('');
+        return {
+          commandId: '',
+          exitCode: 0,
+          output: stripAnsi(output.trim(), true),
+        };
+      } catch {
+        return { commandId: '', exitCode: -1, output: '' };
+      }
+    }
+  }
+
+  // ── Local: spawn child process ──
   try {
     const result: { exit_code: number; stdout: string; stderr: string } =
       await invoke('exec_shell_cmd', {
@@ -66,10 +109,7 @@ async function executeAndCapture(
         timeoutSecs: Math.ceil(timeoutMs / 1000),
       });
 
-    const output = (result.stdout || '').trim();
-    const stderr = (result.stderr || '').trim();
-    const combined = [output, stderr].filter(Boolean).join('\n');
-
+    const combined = [result.stdout?.trim(), result.stderr?.trim()].filter(Boolean).join('\n');
     return {
       commandId: '',
       exitCode: result.exit_code,
@@ -84,13 +124,29 @@ async function executeAndCapture(
   }
 }
 
-/** Strip ANSI escape sequences from captured output. */
-function stripAnsi(text: string): string {
-  return text
+/** Strip ANSI escape sequences, shell prompts, and sentinel artifacts from output. */
+function stripAnsi(text: string, isSsh = false): string {
+  let cleaned = text
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b[()][0-9A-Z]/g, '')
-    .replace(/\r/g, '')
+    .replace(/\r/g, '');
+
+  if (isSsh) {
+    // Remove sentinel lines and command echoes containing sentinel
+    cleaned = cleaned.replace(/^.*__HARNESS_END_\w+__.*$/gm, '');
+    // Remove shell prompts: user@host:path$
+    cleaned = cleaned.replace(/^[^@\s]+@[^:]+:.*?[$#]\s*/gm, '');
+    // Remove isolated `>` continuation prompts
+    cleaned = cleaned.replace(/^>\s*$/gm, '');
+    // Remove leading prompt arrows
+    cleaned = cleaned.replace(/^\s*❯\s*/gm, '');
+    // Remove first line if it looks like an echoed command (contains '; echo')
+    cleaned = cleaned.replace(/^.+\s*;\s*echo\s+'.*$/gm, '');
+    cleaned = cleaned.replace(/^.+\s*;\s*echo\s+".*$/gm, '');
+  }
+
+  return cleaned
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -227,7 +283,7 @@ export async function runPipeline(
 
     // Execute and capture output.
     // Long-running commands (recursive scans, downloads) get a longer timeout.
-    const isLongRunning = /-Recurse|npm (install|build)|cargo build|pip install|winget install/i.test(step.command);
+    const isLongRunning = /-Recurse|npm (install|build)|cargo build|pip install|winget install|openclaw|systemctl|docker/i.test(step.command);
     const timeout = isLongRunning ? 300_000 : 60_000;
 
     onExecuteStart(step);

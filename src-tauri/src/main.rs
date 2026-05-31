@@ -43,6 +43,7 @@ fn main() {
             session_commands::create_session,
             session_commands::list_local_shells,
             session_commands::query_server_stats,
+            session_commands::ssh_exec_cmd,
             // PTY commands (write / resize / destroy / block)
             commands::write_to_terminal,
             commands::get_terminal_cwd,

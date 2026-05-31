@@ -4,7 +4,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useOutputStore } from '@/stores/outputStore';
-import { nlToAction, resolveProvider, getLastTokenUsage } from '@/lib/aiService';
+import { nlToAction, resolveProvider, getLastTokenUsage, chatRaw } from '@/lib/aiService';
 import type { AiTaskStep, ChatMessage } from '@/lib/aiService';
 import { assemblePrompt, appendShortTerm } from '@/lib/memoryService';
 import {
@@ -276,6 +276,17 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
         const harnessConfig = useSettingsStore.getState().settings.harness;
         const capturedOutputs: { description: string; command: string; output: string }[] = [];
 
+        // Inject thinking header — will be auto-collapsed when task completes.
+        // Detect the actual execution platform: remote SSH server vs local machine.
+        const sessStore = useSessionStore.getState();
+        const activeSess = sessStore.activeSessionId ? sessStore.sessions.get(sessStore.activeSessionId) : undefined;
+        const activeTerm = activeSess?.terminals.find((t) => t.connectionId === sessionId);
+        const isRemote = activeTerm?.config?.protocol === 'ssh' || activeTerm?.config?.protocol === 'telnet';
+        const platformInfo = isRemote && 'host' in (activeTerm?.config || {})
+          ? `SSH 远程服务器 (${(activeTerm?.config as any).host})`
+          : (navigator.platform?.toLowerCase().startsWith('win') ? 'Windows' : 'Unix');
+        out.result(`<thinking>执行环境: ${platformInfo}, 用户需求: "${query}"</thinking>`);
+
         const result = await runPipeline(
           query,
           sessionId ?? memoryId,
@@ -293,20 +304,23 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
             },
             onExecuteStart: (step) => {
               stepIndexRef.current++;
+              // Thinking: why this command
+              out.result(`<thinking>执行: ${step.description}</thinking>`);
               out.codeBlock(step.description, step.command);
             },
             onExecuteEnd: (_step, exitCode, capturedOutput) => {
               if (exitCode !== 0) {
                 out.result(`✖ 执行失败 (exit: ${exitCode})`);
+                // Show error detail so user can diagnose
+                if (capturedOutput) {
+                  out.info(capturedOutput.slice(0, 300));
+                }
               }
-              if (capturedOutput) {
-                capturedOutputs.push({
-                  description: _step.description,
-                  command: _step.command,
-                  output: capturedOutput,
-                });
-                // Data display deferred — personality prefix goes first
-              }
+              capturedOutputs.push({
+                description: _step.description,
+                command: _step.command,
+                output: capturedOutput || '',
+              });
             },
           },
           harnessConfig,
@@ -342,6 +356,42 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
           // Then show the data (FileListView handles structured output)
           if (allData) {
             out.result(allData);
+          }
+
+          // ── AI summary: summarise raw output with personality ──
+          if (allData && allData.trim().length > 0 && config.currentProviderId) {
+            try {
+              const soulKey = useSettingsStore.getState().settings.soulProfile;
+              const soulLabels: Record<string, string> = {
+                default: '简洁专业', steady: '沉稳严谨', casual: '轻松随和',
+                terse: '干练利落', curious: '好奇活泼', cool: '高冷简约',
+                gentle: '温柔耐心', funny: '幽默打趣',
+              };
+              const style = soulLabels[soulKey] || '简洁';
+
+              const summaryPrompt = [
+                `你是一位${style}的运维助手。请用一句话总结以下命令执行结果（不超过80字）：`,
+                `任务: ${query}`,
+                `命令输出: ${allData.slice(0, 2000)}`,
+              ].join('\n');
+
+              const summary = await chatRaw(
+                config,
+                [
+                  { role: 'system', content: `你是一位${style}的运维助手。只返回一句话总结，不加前缀，不超过80字。` },
+                  { role: 'user', content: summaryPrompt },
+                ],
+                controller.signal,
+              );
+
+              const trimmed = summary.trim();
+              if (trimmed && trimmed.length > 2) {
+                out.separator();
+                out.result(trimmed);
+              }
+            } catch {
+              // Summarisation is optional — skip silently on failure
+            }
           }
         }
 

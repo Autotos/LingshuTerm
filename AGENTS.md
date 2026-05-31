@@ -78,6 +78,19 @@ npx tsc --noEmit
 cargo check
 ```
 
+## 专用工具优先规则
+
+**查询已知工具状态时，优先使用该工具自带的状态命令。** 禁止对已知工具使用 `ps aux | grep` 等通用排查命令。
+
+| 工具 | 状态查询命令 | 备注 |
+|------|-------------|------|
+| OpenClaw | `openclaw status` | 智能终端代理，非普通守护进程 |
+| Docker | `docker info` | |
+| Git | `git status` | |
+| Nginx | `systemctl status nginx` | |
+
+仅当专用命令返回 "command not found" 时回退到通用命令。
+
 ## 平台感知规则
 
 **绝对不要同时为多个平台生成命令！** 系统提示词会告知当前操作系统。

@@ -39,7 +39,7 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   sidebarCollapsed: false,
   sidebarWidth: 260,
-  outputHeight: 200,
+  outputHeight: 350,
   isEditorVisible: false,
   isSftpVisible: false,
   sidebarTab: 'sessions',

@@ -194,6 +194,51 @@ impl ConnectionManager {
         }
     }
 
+    /// Execute an arbitrary command on the remote SSH server via a separate
+    /// exec channel.  Does NOT touch the user's interactive PTY.
+    /// Returns a tuple of (stdout, exit_code).
+    pub async fn ssh_exec(&self, session_id: &str, command: &str, timeout_secs: u64) -> Result<(String, i32)> {
+        let handle = self
+            .get_ssh_handle(session_id)
+            .ok_or_else(|| anyhow::anyhow!("SSH handle not found for: {}", session_id))?;
+
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .context("Failed to open SSH exec channel")?;
+
+        channel
+            .exec(true, command)
+            .await
+            .context("Failed to exec SSH command")?;
+
+        let mut output = String::new();
+        let mut exit_code: i32 = -1;
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() { break; }
+
+            match tokio::time::timeout(remaining, channel.wait()).await {
+                Ok(Some(russh::ChannelMsg::Data { data })) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Some(russh::ChannelMsg::Eof)) | Ok(None) => break,
+                Ok(Some(russh::ChannelMsg::ExitStatus { exit_status })) => {
+                    exit_code = exit_status as i32;
+                    // Continue draining — there may be more data after exit status
+                    continue;
+                }
+                Ok(Some(_)) => continue,
+                Err(_) => break,
+            }
+        }
+
+        let _ = channel.close().await;
+        Ok((output, exit_code))
+    }
+
     /// Query remote server statistics via a SEPARATE SSH exec channel.
     /// Does NOT touch the user's interactive PTY — output is invisible to the terminal.
     pub async fn query_server_stats(&self, session_id: &str) -> Result<String> {
