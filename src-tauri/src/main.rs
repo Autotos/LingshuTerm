@@ -101,7 +101,9 @@ fn main() {
             sftp::sftp_create_file,
             // AI proxy (CORS bypass)
             ai_proxy::ai_proxy_request,
-            // Direct shell command execution (no PTY)
+            // Shell command execution (streaming + cancellable)
+            exec_shell::exec_shell_stream,
+            exec_shell::kill_shell_task,
             exec_shell::exec_shell_cmd,
             // Media file utilities
             media::read_image_base64,

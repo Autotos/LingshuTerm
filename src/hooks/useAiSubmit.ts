@@ -304,11 +304,19 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
             },
             onExecuteStart: (step) => {
               stepIndexRef.current++;
-              // Thinking: why this command
-              out.result(`<thinking>执行: ${step.description}</thinking>`);
+              // Thinking block with per-step status 'running'
+              out.addItem({ kind: 'result', content: `<thinking>执行: ${step.description}</thinking>`, stepStatus: 'running' });
               out.codeBlock(step.description, step.command);
             },
             onExecuteEnd: (_step, exitCode, capturedOutput) => {
+              // Mark the thinking block as done — it's the item before the code block
+              const items = useOutputStore.getState().items;
+              for (let i = items.length - 1; i >= 0; i--) {
+                if (items[i].stepStatus === 'running') {
+                  useOutputStore.getState().setItemStatus(i, exitCode === 0 ? 'done' : 'error');
+                  break;
+                }
+              }
               if (exitCode !== 0) {
                 out.result(`✖ 执行失败 (exit: ${exitCode})`);
                 // Show error detail so user can diagnose
@@ -344,22 +352,19 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
         // ── Personality prefix + data output ──
         if (result.finalStatus === 'success' && result.steps.length > 0) {
           const profile = useSettingsStore.getState().settings.soulProfile;
-          const allData = capturedOutputs.map((o) => o.output.trim()).filter(Boolean).join('\n');
+          const allData = capturedOutputs.map((o) => (o.output || '').trim()).filter(Boolean).join('\n');
           const prefix = buildPersonalityResponse(profile, query, capturedOutputs);
 
-          // Show personality prefix FIRST
           if (prefix) {
             out.separator();
             out.result(prefix);
           }
-
-          // Then show the data (FileListView handles structured output)
           if (allData) {
             out.result(allData);
           }
 
-          // ── AI summary: summarise raw output with personality ──
-          if (allData && allData.trim().length > 0 && config.currentProviderId) {
+          // ── AI summary ──
+          if (allData && config.currentProviderId) {
             try {
               const soulKey = useSettingsStore.getState().settings.soulProfile;
               const soulLabels: Record<string, string> = {
@@ -369,10 +374,40 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
               };
               const style = soulLabels[soulKey] || '简洁';
 
+              // Extract accurate stats — JSON-aware for ConvertTo-Json output
+              let totalCount = 0;
+              let imageCount = 0;
+              let uniqueDirs = 0;
+              const jsonMatch = allData.trim().match(/^\[[\s\S]*\]$/);
+              if (jsonMatch) {
+                try {
+                  const arr = JSON.parse(jsonMatch[0]);
+                  if (Array.isArray(arr) && arr.length > 0) {
+                    totalCount = arr.length;
+                    imageCount = arr.filter((f: any) => /\.(jpe?g|png|gif|bmp|webp|tiff?|svg)$/i.test(String(f.Name || f.FullName || ''))).length;
+                    uniqueDirs = new Set(arr.map((f: any) => {
+                      const fp = String(f.FullName || '').replace(/\\/g, '/');
+                      return fp.substring(0, fp.lastIndexOf('/'));
+                    }).filter(Boolean)).size;
+                  }
+                } catch { /* fall through to text parsing */ }
+              }
+              if (totalCount === 0) {
+                const lines = allData.split('\n').filter((l) => l.trim());
+                totalCount = lines.length;
+                imageCount = lines.filter((l) => /\.(jpe?g|png|gif|bmp|webp|tiff?|svg)$/i.test(l.trim())).length;
+                uniqueDirs = new Set(lines.map((l) => l.replace(/[\\/][^\\/]+$/, ''))).size;
+              }
+
+              let statsHint = `共 ${totalCount} 个文件`;
+              if (imageCount > 0) statsHint += `，其中 ${imageCount} 张图片，分布在 ${uniqueDirs} 个目录`;
+              statsHint += `。请使用这些准确数据。`;
+
               const summaryPrompt = [
                 `你是一位${style}的运维助手。请用一句话总结以下命令执行结果（不超过80字）：`,
                 `任务: ${query}`,
-                `命令输出: ${allData.slice(0, 2000)}`,
+                `${statsHint}`,
+                `命令输出(前段): ${allData.slice(0, 3000)}`,
               ].join('\n');
 
               const summary = await chatRaw(
@@ -390,7 +425,7 @@ export function useAiSubmit({ sessionId }: UseAiSubmitOptions): UseAiSubmitRetur
                 out.result(trimmed);
               }
             } catch {
-              // Summarisation is optional — skip silently on failure
+              // Summarisation is optional
             }
           }
         }

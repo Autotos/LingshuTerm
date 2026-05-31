@@ -9,7 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { nlToTasks, resolveProvider } from '@/lib/aiService';
 import type { AiTaskStep } from '@/lib/aiService';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -57,6 +57,7 @@ async function executeAndCapture(
   sessionId: string,
   command: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<ExecuteResult> {
   const isSsh = sessionId.startsWith('ssh-');
 
@@ -101,20 +102,60 @@ async function executeAndCapture(
     }
   }
 
-  // ── Local: spawn child process ──
+  // ── Local: streaming child process with cancel ──
   try {
-    const result: { exit_code: number; stdout: string; stderr: string } =
-      await invoke('exec_shell_cmd', {
-        command,
-        timeoutSecs: Math.ceil(timeoutMs / 1000),
+    const taskId: string = await invoke('exec_shell_stream', {
+      command,
+      timeoutSecs: Math.ceil(timeoutMs / 1000),
+    });
+
+    const chunks: string[] = [];
+    let exitCode = -1;
+    let unlisten: UnlistenFn | null = null;
+
+    const result = await new Promise<ExecuteResult>((resolve) => {
+      listen<{ task_id: string; data?: string; exit_code?: number }>('shell-output', (event) => {
+        const p = event.payload;
+        if (p.task_id === taskId && p.data) chunks.push(p.data);
+      }).then((fn) => { unlisten = fn; });
+
+      listen<{ task_id: string; exit_code: number }>('shell-complete', (event) => {
+        const p = event.payload;
+        if (p.task_id === taskId) {
+          exitCode = p.exit_code;
+          void unlisten?.();
+          resolve({
+            commandId: taskId,
+            exitCode,
+            output: stripAnsi(chunks.join('').trim()),
+          });
+        }
+      }).catch(() => {
+        resolve({ commandId: taskId, exitCode: -1, output: stripAnsi(chunks.join('').trim()) });
       });
 
-    const combined = [result.stdout?.trim(), result.stderr?.trim()].filter(Boolean).join('\n');
-    return {
-      commandId: '',
-      exitCode: result.exit_code,
-      output: stripAnsi(combined),
-    };
+      // Timeout safety
+      setTimeout(() => {
+        if (exitCode === -1) {
+          invoke('kill_shell_task', { taskId }).catch(() => {});
+          void unlisten?.();
+          resolve({ commandId: taskId, exitCode: -1, output: stripAnsi(chunks.join('').trim()) });
+        }
+      }, timeoutMs);
+
+      // Abort signal: user clicked stop
+      if (signal) {
+        const onAbort = () => {
+          invoke('kill_shell_task', { taskId }).catch(() => {});
+          void unlisten?.();
+          resolve({ commandId: taskId, exitCode: -1, output: '用户手动终止' });
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+
+    return result;
   } catch (err) {
     return {
       commandId: '',
@@ -288,7 +329,7 @@ export async function runPipeline(
 
     onExecuteStart(step);
     try {
-      const execResult = await executeAndCapture(execSessionId, step.command, timeout);
+      const execResult = await executeAndCapture(execSessionId, step.command, timeout, signal);
       const capturedOutput = execResult.output.trim();
       onExecuteEnd(step, execResult.exitCode, capturedOutput);
       if (execResult.exitCode !== 0) {

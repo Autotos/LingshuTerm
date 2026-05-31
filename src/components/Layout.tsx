@@ -20,6 +20,7 @@ import { useSessionStore } from '@/stores/sessionStore';
 import { useUiStore } from '@/stores/uiStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useConnectionStore } from '@/stores/connectionStore';
+import { useOutputStore } from '@/stores/outputStore';
 import { useBlockSession } from '@/hooks/useBlockSession';
 import { useAiSubmit } from '@/hooks/useAiSubmit';
 import { useTaskQueue } from '@/hooks/useTaskQueue';
@@ -81,6 +82,11 @@ export function Layout() {
     confirmDialog,
   } = useAiSubmit({ sessionId: activeConnectionId });
   useTaskQueue({ sessionId: activeConnectionId });
+
+  // Wire cancel to Output panel stop button
+  useEffect(() => {
+    useOutputStore.getState().setOnCancel(() => cancelAiQuery());
+  }, [cancelAiQuery]);
 
   const sessionLabel = activeSessionId
     ? (sessions.get(activeSessionId)?.title ?? activeSessionId)
